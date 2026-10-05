@@ -10,6 +10,21 @@ name = "flashdrop"
 main = "src/index.js"
 compatibility_date = "2026-09-01"
 
+# ---------------------------- 自定义域名 ----------------------------
+# 6.中国 的 punycode 写法就是 6.xn--fiqs8s（wrangler 里必须写 ASCII 形式）。
+# custom_domain = true 表示由 Cloudflare 自动签发证书 + 建 DNS 记录，
+# 不需要手动去 DNS 面板加 CNAME。
+routes = [
+  { pattern = "6.xn--fiqs8s", custom_domain = true },
+  # 临时预览入口：借已激活的 midoai.com 区域做实测（6.中国 切 NS 生效前可用）。
+  # 不需要时删掉这一行重新 deploy 即可。
+  { pattern = "flashdrop.midoai.com", custom_domain = true }
+]
+
+# 保留 *.workers.dev 备用入口（海外可直连；大陆被 DNS 污染，走不通，
+# 所以它只是「兜底 + 验证」用，主入口始终是 6.中国）。
+workers_dev = true
+
 # 静态资源直接从 ../public 取，和本地 Node 版共用同一份前端，避免两套代码漂移
 [assets]
 directory = "../public"
