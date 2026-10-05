@@ -13,14 +13,21 @@ compatibility_date = "2026-09-01"
 # ---------------------------- 自定义域名 ----------------------------
 # 6.中国 的 punycode 写法就是 6.xn--fiqs8s（wrangler 里必须写 ASCII 形式）。
 # custom_domain = true 表示由 Cloudflare 自动签发证书 + 建 DNS 记录，
-# 不需要手动去 DNS 面板加 CNAME。
+# 不需要手动去 DNS 面板加 CNAME —— 面板上那几条「缺少 A / CNAME / MX」的
+# 扫描提示对 Worker 站点是误报，**一律忽略，不要手动补**。
 #
-# www.6.中国 必须单独列一条：DNS 里没有「自动补 www」这回事，
-# www.6.中国 是个三级域名，跟 6.中国 是两个完全不同的名字，
-# 不显式绑定就一直 ENOTFOUND（打不开）。
+# 为什么是四条而不是两条：
+#   ① www 必须单独列：DNS 里没有「自动补 www」这回事，www.6.中国 是个
+#      三级域名，跟 6.中国 是两个完全不同的名字，不显式绑定就一直 ENOTFOUND。
+#   ② 繁体 6.中國 也必须单独列：.中國(xn--fiqz9s) 和 .中国(xn--fiqs8s)
+#      是**两个不同的顶级域**，CNNIC 那边简繁共用一份注册数据（所以 NS 一起改了），
+#      但在 Cloudflare 是各自独立的 zone，DNS 层面互不相认。
+#      前端 www-redirect.js 会把繁体写法归一到简体，保证设备名/配对记忆只有一份。
 routes = [
-  { pattern = "6.xn--fiqs8s", custom_domain = true },
-  { pattern = "www.6.xn--fiqs8s", custom_domain = true }
+  { pattern = "6.xn--fiqs8s",     custom_domain = true },  # 6.中国
+  { pattern = "www.6.xn--fiqs8s", custom_domain = true },  # www.6.中国
+  { pattern = "6.xn--fiqz9s",     custom_domain = true },  # 6.中國（繁体）
+  { pattern = "www.6.xn--fiqz9s", custom_domain = true }   # www.6.中國（繁体）
 ]
 
 # 保留 *.workers.dev 备用入口（海外可直连；大陆被 DNS 污染，走不通，

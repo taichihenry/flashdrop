@@ -222,6 +222,26 @@ https://flashdrop.<你的子域>.workers.dev
    ```
    **把这两条记下来。**
 
+> ### ⚠️ 扫描结果里那几条「缺少 DNS 记录」的警告，对本项目全部可以忽略
+>
+> zone 建好后，DNS 页面会提示你补 `A` / `AAAA` / `CNAME` / `MX` 记录。
+> 对一个**纯 Worker 站点**，这些提示都是通用体检的误报：
+>
+> | 提示 | 为什么不适用 |
+> |---|---|
+> | 缺少 apex `A` / `AAAA` / `CNAME` | Worker 自定义域由 Cloudflare 在 deploy 时**自动建 `type=Worker` 记录**，不需要你填 IP |
+> | 缺少 `www` 子域记录 | 同上，`custom_domain = true` 会连带把 `www` 一起建出来 |
+> | 缺少 `MX`（邮件） | 本项目不收邮件。**补了反而多开一个可被投递的入口**，纯增攻击面 |
+>
+> 「配没配对」要看**三件事**，不是看这几条提示：
+> ① zone 是否 `active`；② NS 是否与注册商处一致；③ 实测能否解析 + 访问。
+>
+> API 查 zone 状态最准（面板渲染可能是缓存）：
+> ```bash
+> curl -s "https://api.cloudflare.com/client/v4/zones?per_page=50" \
+>   -H "Authorization: Bearer <你的 token>" | grep -o '"name":"[^"]*"\|"status":"[^"]*"'
+> ```
+
 ### 5.2 去注册商改 NS
 
 登录你注册 `6.中国` 的地方 → 找到该域名的管理页 → **DNS 修改 / 修改 DNS 服务器**
@@ -259,6 +279,38 @@ curl -sI "https://6.xn--fiqs8s/" | head -5
 
 > **这时候别忘了那个拨号页**：如果它还要保留，在 Cloudflare 的 DNS 里
 > 加一条 `www` 的 A/CNAME 记录指回原地址。
+
+### 5.4 四个入口都要绑（`www` 和繁体 `6.中國`）
+
+`wrangler.toml` 里维护的是四条自定义域，**不是两条**：
+
+```toml
+routes = [
+  { pattern = "6.xn--fiqs8s",     custom_domain = true },  # 6.中国
+  { pattern = "www.6.xn--fiqs8s", custom_domain = true },  # www.6.中国
+  { pattern = "6.xn--fiqz9s",     custom_domain = true },  # 6.中國（繁体）
+  { pattern = "www.6.xn--fiqz9s", custom_domain = true }   # www.6.中國（繁体）
+]
+```
+
+两条容易忽略的：
+
+- **`www` 不是自动的。** DNS 里没有「自动补 www」这回事，`www.6.中国` 是**三级域名**，
+  和 `6.中国` 是两个完全不同的名字，不显式绑定就是 `ENOTFOUND`。
+- **`.中國` 是另一个顶级域。** `.中国`( `xn--fiqs8s` ) 和 `.中國`( `xn--fiqz9s` )
+  punycode 不同 —— 别记成 `xn--kpry57d`。注册局（CNNIC）把两者当成同一份注册数据
+  （所以改一个的 NS，另一个跟着变），但 **Cloudflare 侧必须各自建 zone、各自绑定**。
+
+  > 规范写法：用 Node 现算最稳
+  > `node -e "console.log(new URL('https://6.中國').hostname)"` → `6.xn--fiqz9s`
+
+繁体 zone 的建法和简体完全一样（§5.1 → §5.3），**但不用再去改 NS** ——
+CNNIC 那边一直就是 `odin` / `tricia`，所以 zone 通常建完直接就是 `active`。
+
+**归一逻辑不用你写**：`public/www-redirect.js` 里的白名单
+`FAMILY = ['6.xn--fiqs8s', '6.xn--fiqz9s']` 会把后面三种写法都送到 `6.中国`。
+这是必须的 —— 浏览器不认「简繁等效」和「www 等价」，四个域名是四个 origin，
+`localStorage` 各自独立，不归一就会出「在一个地址改的设备名，换个地址打开变默认名」。
 
 ---
 

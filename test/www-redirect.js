@@ -22,6 +22,17 @@
  * 本地跑的前提：`run.js --port 8986 --no-tls` 已经在跑。
  * 本地路径会额外加 `--host-resolver-rules`，把几个域名都解析到本机，不碰真实 DNS。
  *
+ * ⚠️ 这个开关在**系统配了代理的机器上会完全失效**：走代理时 Chrome 不自己解析域名，
+ *   而是把主机名交给代理，于是 host-resolver-rules 被绕开
+ *   （表现：参数传了、但请求照样打到真实 DNS，本地测试会超时 30 秒后失败）。
+ *   实测踩过一次：`http_proxy` 指向 127.0.0.1:53126，于是 `6.xn--fiqs8s:8986`
+ *   被代理解析成 Cloudflare 的真实 IP，连 8986 端口等到超时。
+ *   **所以本地模式必须同时传 `--no-proxy-server`**，本地请求本来就不需要代理。
+ *   失效本身不危险（等于多传几个无害参数），但反过来要小心：
+ *   在无代理的机器上跑**线上**目标时若误传了它，会把所有域名指到 127.0.0.1，
+ *   得到一堆 ERR_CONNECTION_REFUSED，而且看不出来是参数导致的。
+ *   所以下面 isLocal 的判断必须严格，不能写成一个宽松正则。
+ *
  * ⚠️ 关于 hash 断言方式（这里有个测试本身的坑）：
  *   页面里的 FlashDrop 在启动时会消费 `#pair=<6位码>`，处理完顺手
  *   `history.replaceState` 把 hash 抹掉（见 app.js 的 initHashPair）。
@@ -52,9 +63,13 @@ function withWww(base, hostname) {
   const apex = new URL(base);
   const wwwU = withWww(base);
 
-  const isLocal = /^https?:\/\/(127\.0\.0\.1|localhost|6\.xn--fiqs8s|www\.|6\.xn--fiqz9s)/.test(base);
+  // 只有「指向本机的写法」才算是本地跑：127.0.0.1 / localhost，或带自定义端口。
+  // 别写成宽松正则 —— 之前写成 /^(...|6\.xn--fiqs8s|...)/ 会把**线上**目标也判成本地，
+  // 于是给线上测试挂上 host-resolver-rules，在无代理的机器上会把域名全指到 127.0.0.1。
+  const u0 = new URL(base);
+  const isLocal = /^(127\.0\.0\.1|localhost)$/.test(u0.hostname) || u0.port !== '';
   const extraArgs = isLocal
-    ? ['--host-resolver-rules=' + [
+    ? ['--no-proxy-server', '--host-resolver-rules=' + [
         'MAP 6.xn--fiqs8s 127.0.0.1',
         'MAP www.6.xn--fiqs8s 127.0.0.1',
         'MAP 6.xn--fiqz9s 127.0.0.1',
@@ -157,29 +172,49 @@ function withWww(base, hostname) {
     else no(`主域名被跳走了，得到 ${ah.hostname}`);
 
     /* ------------------------------------------------------------------
-       [3] 繁体顶级域 .中國 也应归一到主域名
+       [3] 繁体顶级域 .中國 也应归一到主域名（apex 和 www 两种写法都要测）
            前提是先在 Cloudflare 给 6.中國 建 zone 并绑上 Worker。
            没建之前 DNS 解析不了，这里**跳过**而不是判失败。
     ------------------------------------------------------------------ */
     console.log('');
-    const aliasU = new URL(base);
-    aliasU.hostname = TRAD;
-    console.log(`[3] 打开 ${aliasU.origin}/ + ${HASH}  （繁体顶级域 .中國）`);
+    console.log(`[3] 繁体顶级域 .中國 归一（${HASH}）`);
 
-    await b.cdp.send('Page.navigate', { url: aliasU.origin + '/' + HASH });
-    await sleep(3000);
+    // 两种写法都要过：只测 apex 会漏掉「www 形态在繁体 zone 下没绑」的情况
+    for (const host of [TRAD, 'www.' + TRAD]) {
+      const u = new URL(base);
+      u.hostname = host;
+      console.log(`    → ${u.origin}/`);
 
-    const aliasHref = await b.cdp.eval('location.href').catch(() => '');
-    console.log('    实际：' + aliasHref);
+      await b.cdp.send('Page.navigate', { url: u.origin + '/' + HASH });
 
-    if (/^chrome-error:/.test(aliasHref) || aliasHref === 'about:blank') {
-      skip++;
-      console.log('    ⏭  跳过：6.中國 目前还解析不了（Cloudflare 侧 zone 尚未建立）。');
-      console.log('        等把 6.中國 加进 Cloudflare 并绑到 Worker 后，重跑这条就会变 ✅');
-    } else {
-      const al = new URL(aliasHref);
-      if (al.hostname === apex.hostname) ok(`繁体域名已归一到 ${al.hostname}`);
-      else no(`繁体域名未归一，停在 ${al.hostname}`);
+      // ⚠️ 不能用固定 sleep(3000)：第一次接触一个新 IDN 顶级域时，
+      //    DNS + TLS 握手 + 跳转实测要 1~2 秒，偶尔超过 3 秒，
+      //    于是「其实跳成功了、只是还没跳完」被误判成失败（真出现过）。
+      //    这里必须轮询，等到落定或超时。
+      let href = '';
+      try {
+        await waitFor(`${host} 落定`, async () => {
+          href = await b.cdp.eval('location.href');
+          // 两种终局：① 已是主域名 ② 明确是个错误页（域名解析不了）
+          return (
+            (href.indexOf(apex.hostname) !== -1 && href.indexOf(host) === -1) ||
+            /^chrome-error/.test(href)
+          );
+        }, 25000, 200);
+      } catch {
+        href = await b.cdp.eval('location.href').catch(() => '');
+      }
+      console.log(`      实际：${href}`);
+
+      if (/^chrome-error:/.test(href) || href === 'about:blank') {
+        skip++;
+        console.log('      ⏭  跳过：该域名目前还解析不了（Cloudflare 侧 zone / 自定义域尚未建立）。');
+        console.log('         等把 6.中國 加进 Cloudflare 并绑到 Worker 后，重跑这条就会变 ✅');
+      } else {
+        const got = new URL(href);
+        if (got.hostname === apex.hostname) ok(`${host} 已归一到 ${got.hostname}`);
+        else no(`${host} 未归一，停在 ${got.hostname}`);
+      }
     }
 
     /* ------------------------------------------------------------------
