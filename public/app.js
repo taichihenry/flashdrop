@@ -308,7 +308,7 @@
       hint.textContent =
         `⚠ 当前浏览器不支持流式写盘，${FD.formatBytes(req.totalSize)} 得先全部装进内存。`
         + `超过约 ${FD.formatBytes(risk.limit)} 时很可能导致页面崩溃，`
-        + `建议让对方分批发送，或改用电脑端接收。`;
+        + `建议让对方分批发送，或改用内存更大的设备（如电脑）接收。`;
     } else if (!fsOk && big) {
       hint.hidden = false;
       hint.textContent =
@@ -755,18 +755,19 @@
       hint.textContent = '建议改用 HTTPS 地址访问，以启用点对点直传。';
     }
 
-    // 公网部署（Cloudflare）下，"连同一个 Wi-Fi""证书不受信任"这类引导全是错的，
-    // 换成对公网用户成立的说法。局域网自用版本仍走原来那套文案。
-    if (state.serverInfo.mode === 'public') {
-      const lead = $('connect-lead');
-      if (lead) lead.innerHTML = '手机扫左侧二维码，用浏览器打开同一个页面即可互传，<b>不用装任何 App</b>。';
-
+    // 首页引导文案：HTML 里那份默认文案本身就是"通用版"，对公网和局域网两种部署都成立
+    // （不再出现"必须连同一个 Wi-Fi"这种把跨网络用户拦在门外的说法）。
+    // 只有本地自建（Node）版需要额外补一条 —— 它用自签名证书，手机第一次必然撞警告。
+    // 判据：Cloudflare 版返回 mode='public'，Node 版不返回该字段。
+    if (state.serverInfo.mode !== 'public') {
       const steps = $('connect-steps');
-      if (steps) {
-        steps.innerHTML =
-          '<li>手机扫描左侧二维码，用浏览器打开本页</li>' +
-          '<li>同一网络下的设备会自动互相「看见」，点一下就能发</li>' +
-          '<li>不在同一网络的设备：一端点顶部<b>配对</b>拿到 6 位码，另一端输码即可跨网络互传</li>';
+      if (steps && !steps.dataset.certHint) {
+        steps.dataset.certHint = '1';   // 幂等，避免重复调用时插出两条
+        steps.insertAdjacentHTML(
+          'afterbegin',
+          '<li>首次打开会提示「证书不受信任」——这是自签名证书的正常现象，'
+            + '点 <b>高级</b> → <b>继续访问</b> 即可（服务只跑在你自己的电脑上）</li>'
+        );
       }
     }
   }

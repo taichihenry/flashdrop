@@ -1,7 +1,7 @@
 {
-  "name": "FlashDrop 局域网互传",
+  "name": "FlashDrop 跨设备互传",
   "short_name": "FlashDrop",
-  "description": "同一 Wi-Fi 下手机与电脑互传文字和文件，不经过第三方服务器",
+  "description": "手机、电脑、平板之间互传文字和文件；同一网络自动发现，跨网络用 6 位码配对",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#f5f6f8",

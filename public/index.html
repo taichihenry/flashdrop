@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#ffffff">
-<title>FlashDrop · 局域网互传</title>
+<title>FlashDrop · 跨设备互传</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/app.css">
@@ -41,19 +41,19 @@
 <main>
   <!-- 无对端时的引导区：大二维码 -->
   <section id="connect-panel" class="card connect-card">
-    <h2>用手机扫这个码</h2>
+    <h2>用另一台设备扫这个码</h2>
     <div class="connect-body">
       <div id="qr-holder" class="qr-holder"></div>
       <div class="connect-info">
-        <p class="lead" id="connect-lead">手机连上<b>同一个 Wi-Fi</b>，扫左侧二维码即可开始互传。</p>
+        <p class="lead" id="connect-lead">扫码打开本页，两台设备就能直接互传文字和文件 —— <b>手机、电脑、平板都行，不用装任何 App</b>。</p>
         <div class="url-row">
           <code id="lan-url">检测中…</code>
           <button id="btn-copy-url" class="btn btn-ghost btn-sm">复制</button>
         </div>
         <ol class="steps" id="connect-steps">
-          <li>首次打开会提示「证书不受信任」——这是自签名证书的正常现象</li>
-          <li>点 <b>高级</b> → <b>继续访问</b> 即可（服务只跑在你自己的电脑上）</li>
-          <li>另一端打开后，两边会自动互相「看见」，不需要输任何地址</li>
+          <li>用<b>另一台设备</b>的相机或浏览器扫左侧二维码</li>
+          <li>两边会自动互相「看见」，点一下对方的名字就能发送</li>
+          <li>不在同一个网络的（比如一台连 Wi-Fi、一台用流量）：一端点顶部<b>配对</b>拿到 6 位码，另一端输码即可跨网络互传</li>
         </ol>
         <div id="secure-hint" class="notice" hidden></div>
       </div>
