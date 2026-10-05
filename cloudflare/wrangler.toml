@@ -14,8 +14,13 @@ compatibility_date = "2026-09-01"
 # 6.中国 的 punycode 写法就是 6.xn--fiqs8s（wrangler 里必须写 ASCII 形式）。
 # custom_domain = true 表示由 Cloudflare 自动签发证书 + 建 DNS 记录，
 # 不需要手动去 DNS 面板加 CNAME。
+#
+# www.6.中国 必须单独列一条：DNS 里没有「自动补 www」这回事，
+# www.6.中国 是个三级域名，跟 6.中国 是两个完全不同的名字，
+# 不显式绑定就一直 ENOTFOUND（打不开）。
 routes = [
-  { pattern = "6.xn--fiqs8s", custom_domain = true }
+  { pattern = "6.xn--fiqs8s", custom_domain = true },
+  { pattern = "www.6.xn--fiqs8s", custom_domain = true }
 ]
 
 # 保留 *.workers.dev 备用入口（海外可直连；大陆被 DNS 污染，走不通，
