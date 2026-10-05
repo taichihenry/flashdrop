@@ -1,0 +1,15 @@
+{
+  "name": "flashdrop-cloudflare",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "FlashDrop 的 Cloudflare Workers 部署版：静态资源 + Durable Object 信令 + TURN 额度闸门",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node test/do-sim.js"
+  },
+  "devDependencies": {
+    "wrangler": "^4.147.0"
+  }
+}

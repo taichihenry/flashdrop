@@ -1,0 +1,12 @@
+{
+  "name": "FlashDrop 局域网互传",
+  "short_name": "FlashDrop",
+  "description": "同一 Wi-Fi 下手机与电脑互传文字和文件，不经过第三方服务器",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f6f8",
+  "theme_color": "#ffffff",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

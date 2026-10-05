@@ -1,0 +1,8 @@
+# 本地开发用（wrangler dev 会自动读取 .dev.vars）
+# 复制成 .dev.vars 再填值。⚠ .dev.vars 含密钥，不要提交到 git。
+#
+# 这两个值只在本地调试 TURN 时需要；不填的话 /turn-credentials 会直接
+# 返回「未配置」，前端自动退回 WebSocket 中继，不影响其它功能调试。
+
+TURN_KEY_ID=
+TURN_KEY_SECRET=

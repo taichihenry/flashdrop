@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#ffffff">
+<title>FlashDrop · 局域网互传</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<div id="insecure-banner" class="banner banner-danger" hidden>
+  <div class="banner-text">
+    <strong>当前地址不是安全上下文，浏览器会禁用直传能力。</strong>
+    <span id="insecure-detail"></span>
+  </div>
+</div>
+
+<header class="topbar">
+  <div class="brand">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+      <path d="M13 2 4.5 13.5H11l-1 8.5 9-12h-6.5z" fill="currentColor"/>
+    </svg>
+    <span>FlashDrop</span>
+  </div>
+
+  <div class="topbar-right">
+    <span id="conn-status" class="status status-connecting">
+      <i class="dot"></i><span id="conn-text">连接中…</span>
+    </span>
+    <button id="btn-name" class="btn btn-ghost btn-sm" title="修改设备名">
+      <span id="my-name">…</span>
+    </button>
+    <button id="btn-pair" class="btn btn-ghost btn-sm" title="配对固定设备（可跨网络）">配对</button>
+    <button id="btn-room" class="btn btn-ghost btn-sm" title="创建/加入公共房间">房间</button>
+  </div>
+</header>
+
+<main>
+  <!-- 无对端时的引导区：大二维码 -->
+  <section id="connect-panel" class="card connect-card">
+    <h2>用手机扫这个码</h2>
+    <div class="connect-body">
+      <div id="qr-holder" class="qr-holder"></div>
+      <div class="connect-info">
+        <p class="lead" id="connect-lead">手机连上<b>同一个 Wi-Fi</b>，扫左侧二维码即可开始互传。</p>
+        <div class="url-row">
+          <code id="lan-url">检测中…</code>
+          <button id="btn-copy-url" class="btn btn-ghost btn-sm">复制</button>
+        </div>
+        <ol class="steps" id="connect-steps">
+          <li>首次打开会提示「证书不受信任」——这是自签名证书的正常现象</li>
+          <li>点 <b>高级</b> → <b>继续访问</b> 即可（服务只跑在你自己的电脑上）</li>
+          <li>另一端打开后，两边会自动互相「看见」，不需要输任何地址</li>
+        </ol>
+        <div id="secure-hint" class="notice" hidden></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 设备列表 -->
+  <section id="peers-panel" class="card">
+    <div class="card-head">
+      <h2>附近设备</h2>
+      <span id="room-badge" class="badge" hidden></span>
+    </div>
+    <div id="peer-list" class="peer-grid"></div>
+    <p id="peers-empty" class="empty">还没有其他设备。<br>把上面的二维码给另一台设备扫一下，或让它打开同一个地址。</p>
+  </section>
+
+  <!-- 发送区 -->
+  <section id="send-panel" class="card" hidden>
+    <div class="card-head">
+      <h2>发送给 <span id="target-name" class="target">—</span></h2>
+      <button id="btn-clear-target" class="btn btn-ghost btn-sm">取消选择</button>
+    </div>
+
+    <div id="dropzone" class="dropzone" tabindex="0" role="button">
+      <svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true">
+        <path d="M12 3v12m0-12 4 4m-4-4-4 4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"
+              fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <p><b>把文件拖进来</b>，或点击选择</p>
+      <p class="sub">支持多选；文件夹请先自行压缩</p>
+      <input type="file" id="file-input" multiple hidden>
+    </div>
+
+    <div class="text-row">
+      <textarea id="text-input" rows="2" placeholder="也可以发文字 / 网址，对方点一下就能复制"></textarea>
+      <button id="btn-send-text" class="btn btn-primary">发送</button>
+    </div>
+  </section>
+
+  <!-- 传输记录 -->
+  <section id="activity-panel" class="card" hidden>
+    <div class="card-head">
+      <h2>传输记录</h2>
+      <button id="btn-clear-activity" class="btn btn-ghost btn-sm">清空</button>
+    </div>
+    <div id="activity-list" class="activity-list"></div>
+  </section>
+</main>
+
+<footer class="foot">
+  <div class="foot-line">
+    <span>文件在两台设备之间直连传输，不经过第三方服务器</span>
+    <span id="relay-note" class="relay-note" hidden>· 当前有连接走服务器中继</span>
+  </div>
+  <div class="foot-contact">
+    <span>Contact：Email: <a href="mailto:153764384@qq.com">153764384@qq.com</a>, Mobile: <a href="tel:+8613810632766">00 86 13810632766</a></span>
+  </div>
+</footer>
+
+<!-- ============ 弹窗 ============ -->
+<div id="overlay" class="overlay" hidden>
+  <!-- 接收确认 -->
+  <div id="modal-receive" class="modal" hidden>
+    <h3>收到文件</h3>
+    <p id="receive-from" class="muted"></p>
+    <ul id="receive-files" class="file-list"></ul>
+    <p id="receive-total" class="muted"></p>
+    <p id="receive-hint" class="receive-hint" hidden></p>
+    <div class="modal-actions">
+      <button id="btn-reject" class="btn btn-ghost">拒绝</button>
+      <button id="btn-accept" class="btn btn-primary">接受</button>
+    </div>
+  </div>
+
+  <!-- 配对 -->
+  <div id="modal-pair" class="modal" hidden>
+    <h3>配对设备</h3>
+    <div id="pair-initiate-view">
+      <p class="muted">在另一台设备上打开同一地址，点「配对」并输入下面的 6 位码。配对后可跨网络互传。</p>
+      <div id="pair-code" class="pair-code">------</div>
+      <div id="pair-qr" class="qr-holder qr-small"></div>
+      <p class="muted small">配对码 10 分钟内有效，且只能使用一次。</p>
+    </div>
+    <div id="pair-join-view">
+      <p class="muted">输入另一台设备上显示的 6 位配对码：</p>
+      <input id="pair-input" class="input" inputmode="numeric" maxlength="6" placeholder="000000">
+      <p id="pair-error" class="error" hidden></p>
+    </div>
+    <div class="modal-actions">
+      <button id="btn-pair-close" class="btn btn-ghost">关闭</button>
+      <button id="btn-pair-join" class="btn btn-primary">连接</button>
+    </div>
+  </div>
+
+  <!-- 房间 -->
+  <div id="modal-room" class="modal" hidden>
+    <h3>公共房间</h3>
+    <p class="muted">适合临时拉几个人互传。房间码是 5 位字母数字，任何人知道码就能加入。</p>
+    <div class="modal-actions modal-actions-left">
+      <button id="btn-room-create" class="btn btn-primary">创建一个房间</button>
+    </div>
+    <div class="divider">或加入已有房间</div>
+    <div class="room-join-row">
+      <input id="room-input" class="input" maxlength="12" placeholder="输入房间码">
+      <button id="btn-room-join" class="btn">加入</button>
+    </div>
+    <p id="room-error" class="error" hidden></p>
+    <div class="modal-actions">
+      <button id="btn-room-close" class="btn btn-ghost">关闭</button>
+      <button id="btn-room-leave" class="btn btn-ghost" hidden>退出房间</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="/vendor/qrcode.js"></script>
+<script src="/net.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

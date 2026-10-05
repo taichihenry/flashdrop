@@ -1,0 +1,19 @@
+{
+  "name": "flashdrop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "局域网 P2P 互传：手机↔电脑传文字、传文件，同网段扫码即用，文件不落第三方服务器",
+  "main": "run.js",
+  "scripts": {
+    "start": "node run.js",
+    "http": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0",
+    "selfsigned": "^2.4.1",
+    "qrcode-generator": "^1.4.4"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

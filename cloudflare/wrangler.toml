@@ -1,0 +1,55 @@
+# FlashDrop · Cloudflare Workers 配置
+# ---------------------------------------------------------------------------
+# 部署前只需要改一处：把下面的 name 换成你想要的项目名（会出现在
+# <name>.<你的账号>.workers.dev 里，绑自定义域名后就不重要了）。
+#
+# 其余项照抄即可。TURN 相关的三项是 secret，**不要写在这个文件里**，
+# 用 `npx wrangler secret put` 单独注入（见 README）。
+
+name = "flashdrop"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# 静态资源直接从 ../public 取，和本地 Node 版共用同一份前端，避免两套代码漂移
+[assets]
+directory = "../public"
+binding = "ASSETS"
+# 不做 SPA fallback：找不到就是 404，避免把 /ws 之类的路径错误地回成 index.html
+not_found_handling = "none"
+
+# ---------------------------- Durable Objects ----------------------------
+
+[[durable_objects.bindings]]
+name = "SIGNAL"
+class_name = "SignalRoom"
+
+[[durable_objects.bindings]]
+name = "BUDGET"
+class_name = "TurnBudget"
+
+[[migrations]]
+tag = "v1"
+# 免费计划只支持 SQLite 后端的 DO（这是硬性要求，写成 new_classes 会部署失败）
+new_sqlite_classes = ["SignalRoom", "TurnBudget"]
+
+# ------------------------------- 变量 -------------------------------
+# 这些不是机密，直接写在这里；机密的 TURN key 用 wrangler secret 注入。
+
+[vars]
+# WS 中继兜底：P2P 和 TURN 都打不通时，退化成服务器转发（慢，但一定能通）
+WS_RELAY = "on"
+
+# 公网自动发现策略：
+#   "ip"  = 按公网 IP 分房（同一个路由器下的设备互相可见，体验最好）
+#   "off" = 不自动分房，只能靠配对码 / 房间码
+# 注意：国内运营商 CGNAT 会让成千上万用户共享一个出口 IP，
+# 选 "ip" 意味着这些人可能互相看见设备名。详见 README 的"上线前必读"。
+WAN_ROOM_MODE = "ip"
+
+# 每月 TURN 额度闸门（GB）。Cloudflare 免费额度是 1000 GB，留余量。
+TURN_MONTHLY_BUDGET_GB = "900"
+
+# ------------------------------ 可观测性 ------------------------------
+
+[observability]
+enabled = true

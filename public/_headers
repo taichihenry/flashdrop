@@ -1,0 +1,26 @@
+# FlashDrop 响应头（Cloudflare Pages / Workers Assets 会自动读取本文件）
+# 语法：空行分隔的「路径 + 缩进的 Header: value」，不支持变量。
+#
+# ⚠ 如果上线后页面白屏 / 按钮全失效，八成是下面那条 CSP 写得太紧。
+#   排查方法：浏览器 F12 → Console，会有 "Refused to ... because it violates
+#   the following Content Security Policy directive" 的明确报错。
+#   应急办法：先把 Content-Security-Policy 那一行前面加 # 注释掉，重新部署。
+
+/*
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()
+  Strict-Transport-Security: max-age=15552000
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ws: wss:; media-src 'self' blob:; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'
+
+# 入口页和清单不缓存，保证改完立刻生效；带指纹的静态资源交给 Cloudflare 默认策略
+/
+  Cache-Control: public, max-age=0, must-revalidate
+
+/index.html
+  Cache-Control: public, max-age=0, must-revalidate
+
+/manifest.webmanifest
+  Content-Type: application/manifest+json; charset=utf-8
+  Cache-Control: public, max-age=3600
