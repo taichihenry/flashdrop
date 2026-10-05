@@ -285,14 +285,20 @@ cd cloudflare && npm test     # 45 项：分房 / 转发 / 配对 / 休眠重建
 ## 十、部署到公网
 
 **推荐直接上 Cloudflare**（免费、无需运维、自带 HTTPS 与全球加速）。
-完整步骤见 **`docs/Cloudflare部署手册.md`**，上线前的风险清单见
-**`docs/上线前检查报告.md`**。
+代码已托管在 **<https://github.com/taichihenry/flashdrop>**，两条部署路线：
+
+- **路线 A（推荐）**：Cloudflare 后台连接该仓库，**Root directory 必须填 `cloudflare`**，
+  之后每次 `git push` 自动构建上线
+- **路线 B**：本机命令行部署（下面这两条命令）
 
 ```bash
 cd cloudflare
 npm test                  # 离线跑一遍信令逻辑，不需要 Cloudflare 账号
-npx wrangler deploy       # 部署
+npx wrangler deploy       # 路线 B：本机部署
 ```
+
+完整步骤见 **`docs/Cloudflare部署手册.md`**（内含本机 `git push` 必须带的代理参数），
+上线前的风险清单见 **`docs/上线前检查报告.md`**。
 
 架构：静态资源由 Workers Assets 直接吐（不计费），只有 `/ws` 信令和
 `/turn-credentials` 两条路径进 Worker，分别交给 `SignalRoom` 和 `TurnBudget`

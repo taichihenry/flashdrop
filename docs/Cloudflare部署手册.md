@@ -42,6 +42,7 @@ www  →  200 OK，是一个「请使用手机浏览器访问 + 自动拨号」�
 | 需要 | 说明 |
 |---|---|
 | Cloudflare 账号 | 免费版即可。Workers / Durable Objects / 静态资源全在免费额度内 |
+| GitHub 仓库 | ✅ **已完成** —— `taichihenry/flashdrop`，代码已推送 |
 | 域名注册商后台权限 | 最后一步改 NS 要用 |
 | Node.js ≥ 18 | 你机器上有（`C:\Users\201\.workbuddy\binaries\node\...`）|
 | 项目目录 | `D:\workbuddy\flashdrop\` |
@@ -126,22 +127,71 @@ env.TURN_MONTHLY_BUDGET_GB ("900")           Environment Variable
 
 ---
 
-## 4. 首次部署
+## 4. 部署到 Cloudflare
+
+代码**已经推上 GitHub 了**：[`github.com/taichihenry/flashdrop`](https://github.com/taichihenry/flashdrop)
+（公开仓库，分支 `main`）。所以有两条路，**推荐路线 A** —— 配一次，以后 `git push` 就自动上线。
+
+### 4.1 路线 A：让 Cloudflare 从 GitHub 自动部署（推荐）
+
+全程在网页后台点，不用敲命令。
+
+1. 打开 <https://dash.cloudflare.com> → 左侧 **Workers & Pages** → **Create**
+2. 选 **Workers** 标签 → 找到 **Import a repository**（部分界面写作 *Connect to Git*）
+3. 首次会要求授权 GitHub：选账号 **taichihenry** → 只勾选 **flashdrop** 这一个仓库
+   → Install & Authorize
+   （Cloudflare 只能看到你授权的仓库，权限也可随时在 GitHub Settings → Applications 撤销）
+4. 回到配置页，填这几项 —— **关键是第 2 项，填错必失败**：
+
+   | 字段 | 填什么 |
+   |---|---|
+   | Repository | `taichihenry/flashdrop` |
+   | **Root directory（根目录）** | **`cloudflare`** ← 千万别留空 |
+   | Build command | 留空（默认的 `npm ci` 就够） |
+   | Deploy command | `npx wrangler deploy` |
+
+   > **为什么根目录必须是 `cloudflare`**：`wrangler.toml` 在这个子目录里。
+   > 留空的话 Cloudflare 在仓库根目录找不到配置，构建会直接报错。
+   > 配置里 `[assets] directory = "../public"` 会正确指回仓库根的 `public/`，
+   > **前端和 Worker 仍然共用同一份代码**，不会分叉。
+
+5. 点 **Deploy**，等 1～3 分钟（页面会实时滚构建日志）。
+6. 成功后给你一个地址：`https://flashdrop.<你的子域>.workers.dev`
+
+**以后再改代码，只要推送就行**：
+
+```bash
+cd D:/workbuddy/flashdrop
+git add -A && git commit -m "改了什么"
+git push
+```
+
+推上去 Cloudflare 就自动重新构建 —— 这就是你要的「从 GitHub 获取推送」。
+（本机 `git push` 要带代理参数，**照抄第 10 节**，直接敲 `git push` 会卡死。）
+
+**额度**：Workers Builds 免费计划 **3,000 构建分钟/月**（合 50 小时）。
+这项目一次构建约 1～2 分钟，**一个月能推上千次**。
+用完之后只是"构建排队不动了"，**不会自动扣费**，等下个周期重置。
+
+### 4.2 路线 B：本机命令行部署（想第一次快速验证就用它）
 
 ```bash
 cd D:/workbuddy/flashdrop/cloudflare
 npx wrangler deploy
 ```
 
-第一次会问你是否创建 Durable Object 的迁移，输入 `y` 回车。
-
-成功后终端会打印一个地址，形如：
+第一次会问是否创建 Durable Object 迁移，输入 `y` 回车。成功后终端打印地址：
 
 ```
 https://flashdrop.<你的子域>.workers.dev
 ```
 
-**先别急着绑域名，用这个地址验一遍**：
+> 两条路不冲突，但**建议只固定用一条**。它们部署出的 Worker 同名（都叫 `flashdrop`），
+> 谁后部署谁生效，混用容易搞不清线上跑的是哪个版本。
+
+### 4.3 先用 workers.dev 地址验一遍
+
+**先别急着绑域名**：
 
 1. 浏览器打开它 → 应该看到 FlashDrop 首页，页脚有联系方式
 2. 再用另一台设备（手机也行）打开同一地址
@@ -150,7 +200,8 @@ https://flashdrop.<你的子域>.workers.dev
 
 如果这一步就通了，后面的域名和 TURN 只是锦上添花。
 
-> **想看实时日志**：另开一个终端跑 `npx wrangler tail`。
+> **想看实时日志**：`cd D:/workbuddy/flashdrop/cloudflare && npx wrangler tail`
+> （路线 A 的构建日志则在后台的部署记录里看）。
 
 ---
 
@@ -347,13 +398,54 @@ npm install -D wrangler --registry=https://registry.npmmirror.com
 
 | 要做什么 | 命令 / 位置 |
 |---|---|
-| 改代码后重新上线 | `npx wrangler deploy` |
+| 改代码后重新上线 | 路线 A：`git push`（自动构建）· 路线 B：`npx wrangler deploy` |
 | 看实时日志 | `npx wrangler tail` |
+| 看构建记录（成功/失败原因） | 后台 → Workers & Pages → flashdrop → Deployments |
 | 看请求量 / 错误率 | 后台 → Workers & Pages → flashdrop → Metrics |
 | 看 TURN 用量 | 后台 → Billing → Billable Usage |
+| 看构建分钟余量 | 后台 → Workers & Pages → flashdrop → Builds |
 | 改公开房间类型 | `wrangler.toml` 的 `WAN_ROOM_MODE` → 重新部署 |
 | 关掉 WS 中继兜底 | `wrangler.toml` 的 `WS_RELAY = "off"` |
 | 回滚 | 后台 → Worker → Deployments → 选旧版本 Rollback |
 
 本地 Node 版（局域网自用）**没有被改动影响**，双击 `start-flashdrop.bat`
 照样能用，两条路互不干扰。
+
+---
+
+## 10. 本机 `git push` 的正确姿势（重要）
+
+这台机器上有两个坑，直接敲 `git push` 会**卡死**或报证书错。照抄下面这段：
+
+```bash
+cd D:/workbuddy/flashdrop
+
+# 1) 先确认 dev-sidecar 开着（它就是代理，端口 31181）
+#    任务栏能看到 dev-sidecar 图标即可
+
+# 2) 提交
+git add -A
+git commit -m "改了什么"
+
+# 3) 推送（必须指定 Git 路径和代理，否则会卡住）
+GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never \
+  "E:/Git/cmd/git.exe" -C "D:/workbuddy/flashdrop" \
+  -c http.proxy=http://127.0.0.1:31181 \
+  -c http.schannelCheckRevoke=false \
+  push origin main
+```
+
+**三个坑分别是什么**：
+
+| 现象 | 原因 | 解法 |
+|---|---|---|
+| 卡住不动，桌面弹出「Select a credential helper」 | 默认的 `git` 是 WorkBuddy 自带的 PortableGit，它的凭据助手是弹框式的，非交互环境下直接死等 | 改用 `E:/Git/cmd/git.exe`（系统安装版），并带上 `GIT_TERMINAL_PROMPT=0` |
+| `CRYPT_E_NO_REVOCATION_CHECK` | dev-sidecar 做中间人，走它的流量查不了证书吊销状态 | 加 `-c http.schannelCheckRevoke=false` —— **只关吊销检查，证书链照常校验**，比 `sslVerify=false` 安全 |
+| `github.com` 连接超时 / `Empty reply` | 国内网络对 GitHub 主站的干扰（`api.github.com` 反而正常） | 开 dev-sidecar，走 `http.proxy=127.0.0.1:31181` |
+
+> 代理端口如果不是 31181：在 dev-sidecar 界面看「系统代理设置」里的端口，替换即可。
+> 偶发报 `CONNECT tunnel failed, response 502` 是它的老毛病，**隔几秒重试一次就好**，不是你的操作问题。
+
+**首次推送时若提示远端有内容**（比如 GitHub 建仓时勾了 "Add README"）：
+先用 `git fetch origin` 看清远端有什么，再决定合并或覆盖。本仓库首次推送时
+远端只有一个自动生成的占位 README，已用 `--force-with-lease` 覆盖，之后正常推送即可。

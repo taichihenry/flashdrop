@@ -33,6 +33,7 @@
 | **Durable Object 请求** | 100,000 / 天 | 调用失败，直到重置 |
 | **Durable Object 时长** | 13,000 GB-s / 天 | 同上 |
 | **静态资源请求** | **免费且不限量** | —— |
+| **Workers Builds**（GitHub 自动构建） | 3,000 构建分钟 / 月 | 构建排队等待，**不扣费** |
 
 > 最后一行是关键：**Cloudflare 官方明确写了静态资源的请求在主区和付费区都是免费且无限的**
 > （"On both free and paid plans, requests to static assets are free and unlimited"）。
