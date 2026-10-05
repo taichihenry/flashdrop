@@ -1,10 +1,10 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-title FlashDrop 局域网互传
+title FlashDrop 本地版 · 关掉本窗口即停止服务
 
 echo.
-echo   正在启动 FlashDrop...
+echo   正在启动 FlashDrop 本地版（这台电脑将作为服务器）...
 echo.
 
 rem ---- 找 Node.js：先看 PATH，再试常见安装位置 ----
