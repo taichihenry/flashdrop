@@ -458,11 +458,22 @@
         setConn('offline', '与服务器断开，正在重连…');
         renderPeers();
         break;
-      case 'self':
-        if (!localStorage.getItem(LS_NAME)) {
+      case 'self': {
+        // 设备名以本地存档为准，并在每次连接建立后主动推回服务端。
+        //
+        // 服务端在**每次新建连接**时都会按 UA 现场生成一个默认名（「Windows 电脑 · Chrome」），
+        // 而自定义名只存在浏览器 localStorage 里。所以刷新页面 / 断线重连之后，
+        // 服务端并不知道用户改过名 —— 不在这里补报一次，其他终端看到的就永远是默认名。
+        // （现象：我在自己这台改了名，别人的列表里我却还是「Windows 电脑 · Chrome」。）
+        const saved = localStorage.getItem(LS_NAME);
+        if (saved) {
+          $('my-name').textContent = saved;
+          if (saved !== p.displayName) signaling.rename(saved);
+        } else {
           $('my-name').textContent = p.displayName;
         }
         break;
+      }
       case 'peers':
       case 'peer-joined':
       case 'peer-removed':
