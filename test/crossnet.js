@@ -111,6 +111,10 @@ async function startServer() {
     env: {
       ...process.env,
       TRUST_PROXY: '1',        // 关键：信任反代注入的来源 IP
+      // 只认连接地址分房，忽略浏览器自己上报的出口地址 ——
+      // 否则浏览器 STUN 探到的真实出口会把反代伪造的 IP 顶掉，
+      // "模拟两个不同网络"这件事就失效了（两者会被分进同一间房）。
+      IGNORE_REPORTED_ADDR: '1',
       NO_TLS: '1',
       PORT: String(SRV_PORT),
       PYTHONIOENCODING: 'utf-8',

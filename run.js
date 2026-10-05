@@ -74,6 +74,9 @@ const CONF = {
   noTls: process.argv.includes('--no-tls') || envFlag('NO_TLS'),
   // 反代后面必须开，否则所有客户端 IP 都是 127.0.0.1，全部挤进同一间房
   trustProxy: process.argv.includes('--trust-proxy') || envFlag('TRUST_PROXY'),
+  // 只按连接地址分房，忽略浏览器上报的出口地址。
+  // 默认关：双栈网络下必须靠上报值才能让同一张网的两台设备落进同一间房。
+  ignoreReportedAddr: process.argv.includes('--ignore-reported-addr') || envFlag('IGNORE_REPORTED_ADDR'),
   wsRelay: !process.argv.includes('--no-relay'),
   iceServers: parseIceServers(),
 };
@@ -191,6 +194,7 @@ async function main() {
     tls,
     lanUrls,
     trustProxy: CONF.trustProxy,
+    ignoreReportedAddr: CONF.ignoreReportedAddr,
     wsRelay: CONF.wsRelay,
     iceServers: CONF.iceServers,
   });

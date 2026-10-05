@@ -133,7 +133,8 @@ async function main() {
   console.log('[5] 文字消息 A → B（走完整界面路径）');
   await A.cdp.eval(`(() => {
     const card = document.querySelector('.peer');
-    if (card) card.click();
+    // 设备只有一台时界面会自动选中它，这时再点就成了"取消选中" —— 先看一眼。
+    if (card && !card.classList.contains('selected')) card.click();
     return !!card;
   })()`);
   await sleep(400);

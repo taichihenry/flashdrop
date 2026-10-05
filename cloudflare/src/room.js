@@ -53,6 +53,46 @@ function isPrivateIpv4(ip) {
 }
 
 /**
+ * 校验前端上报的出口地址，合法才采纳。
+ *
+ * 为什么需要前端上报：双栈网络里，「这次连接走 IPv4 还是 IPv6」由浏览器的
+ * Happy Eyeballs 决定，结果不稳定。实测同一台电脑上两个浏览器会一个走
+ * IPv4、一个走 IPv6 连进来，而服务器只看得到「这次连接用的地址」，于是把它
+ * 俩分进两个房间，互相看不见。前端用 STUN 探出自己的全部出口地址（优先公网
+ * IPv6）上报，分房就能与「这次连接走哪个协议」解耦。
+ *
+ * 只收公网地址：私网 / 回环 / 链路本地 / ULA 一律拒绝 —— 否则任何人都能
+ * 自报一个地址混进别人的房间（例如报 192.168.1.x 去看同一局域网里的设备名）。
+ * 伪造公网地址仍是理论可行的，但目标前缀无从得知，且房间里只能看到设备名、
+ * 发文件还要对方手动接受，风险可控。
+ *
+ * @param {unknown} reported
+ * @returns {string|null} 归一化后的地址，不合法返回 null
+ */
+function acceptedReportedAddr(reported) {
+  if (typeof reported !== 'string') return null;
+  const a = reported.trim();
+  if (!a || a.length > 64) return null;
+
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(a)) {
+    if (a.split('.').some((n) => Number(n) > 255)) return null;
+    return isPrivateIpv4(a) ? null : a;
+  }
+
+  if (a.indexOf(':') >= 0) {
+    const low = a.toLowerCase();
+    if (!/^[0-9a-f:]+$/.test(low)) return null;
+    if (low.startsWith('fe80')) return null;                    // 链路本地
+    if (low.startsWith('fc') || low.startsWith('fd')) return null; // ULA
+    if (low === '::1' || low === '::') return null;
+    if (!/^[23][0-9a-f]{3}:/.test(low)) return null;            // 只认 2000::/3
+    return low;
+  }
+
+  return null;
+}
+
+/**
  * 房间划分策略（保持与 Node 版一致，只多了 wanRoomMode 开关）：
  *   · 私网 IPv4 → 按 /24 聚合（同一个 Wi-Fi 下的设备自动成房）
  *   · IPv6     → 按 /64 聚合（一个家庭/公司通常共享同一个 /64）
@@ -187,12 +227,24 @@ export class SignalRoom {
     const att = ws.deserializeAttachment() || {};
 
     switch (msg.type) {
+      case 'ping':
+        // 客户端保活。Cloudflare 的 WebSocket 有 100 秒空闲超时，客户端每隔
+        // 75 秒发一个 ping 让连接上有数据流动。回个 pong 就行，不做别的
+        // （服务端仍然不主动心跳，避免白白唤醒 Durable Object）。
+        this._send(ws, { type: 'pong' });
+        break;
+
       case 'pong':
         break;   // 兼容旧客户端，服务端不主动心跳
 
-      case 'join-lan-room':
-        if (att.ipRoom) this._join(ws, att.ipRoom, 'lan');
+      case 'join-lan-room': {
+        // 优先按前端探测到的公网地址分房（解决 IPv4/IPv6 双栈分裂），
+        // 探测失败就退回按这次连接用的地址分房 —— 行为与修复前一致。
+        const reported = acceptedReportedAddr(msg.addr);
+        const roomId = reported ? roomIdForIp(reported, this.wanRoomMode) : att.ipRoom;
+        if (roomId) this._join(ws, roomId, 'lan');
         break;
+      }
 
       case 'create-room': {
         const code = randomRoomCode(5);

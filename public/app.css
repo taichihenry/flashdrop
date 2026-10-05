@@ -139,6 +139,23 @@ main {
   margin-bottom: 12px;
 }
 
+/* 卡片右上角的一组按钮（如「全选 / 取消选择」） */
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* 发送面板里的多播提示：列出会同时收到的那几台设备 */
+#target-sub {
+  font-size: 12.5px;
+  color: var(--ink-3);
+  margin: -6px 0 12px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
 .badge {
   font-size: 12px;
   padding: 3px 9px;

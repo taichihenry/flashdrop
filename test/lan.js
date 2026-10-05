@@ -255,7 +255,9 @@ async function main() {
   console.log('[8] 文字：手机 → 电脑');
   const txt = '局域网测试 ' + Math.random().toString(36).slice(2, 7);
   await phone.cdp.eval(`(() => {
-    const c = document.querySelector('.peer'); if (c) c.click();
+    const c = document.querySelector('.peer');
+    // 只有一台设备时界面会自动选中，这时再点就是"取消选中"，会发不出去
+    if (c && !c.classList.contains('selected')) c.click();
     return true;
   })()`);
   await sleep(400);

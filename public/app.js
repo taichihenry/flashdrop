@@ -11,7 +11,7 @@
   const $ = (id) => document.getElementById(id);
 
   const state = {
-    target: null,          // 选中的 Peer
+    targets: new Set(),    // 选中的 Peer，可多选（多播发送）
     serverInfo: null,      // /api/info
     receiveQueue: [],      // 待确认的接收请求
     receiveOpen: false,
@@ -183,16 +183,26 @@
     list.textContent = '';
     const peers = signaling ? signaling.peerList() : [];
 
+    // 已经断开的设备自动移出选择，避免发到一个死连接上
+    for (const p of [...state.targets]) if (!peers.includes(p)) state.targets.delete(p);
+
     $('peers-empty').hidden = peers.length > 0;
-    $('connect-panel').hidden = peers.length > 0;
+    // 扫码面板「常驻」，不再因为发现设备就整块隐藏。
+    //
+    // 之前这里是 `connect-panel.hidden = peers.length > 0`，副作用是：第二台设备
+    // 一进房间，二维码就整块被顶掉、底下换成发送面板。几百毫秒内完成，看起来像
+    // 「页面闪跳」，实际地址栏都没变 —— 用户会误以为被重定向了。
+    // 现在设备列表和二维码并存，也方便随时再拉第三台设备进来。
+    $('connect-panel').hidden = false;
 
     let anyRelay = false;
     for (const p of peers) {
       const st = peerStateText(p);
       if (p.state === 'relay') anyRelay = true;
 
-      const btn = el('button', 'peer' + (state.target && state.target.id === p.id ? ' selected' : ''));
+      const btn = el('button', 'peer' + (state.targets.has(p) ? ' selected' : ''));
       btn.type = 'button';
+      btn.setAttribute('aria-pressed', state.targets.has(p) ? 'true' : 'false');
 
       const avatar = el('div', 'peer-avatar');
       avatar.innerHTML = /iPhone|iPad|Android/.test(p.name)
@@ -222,44 +232,103 @@
       $('btn-room-leave').hidden = true;
     }
     refreshConnStatus();
+    syncTargetLabel();
   }
 
+  /**
+   * 选中 / 取消选中一台设备（可多选）。
+   *
+   * 多选是为了支持「一台发给多台」。但要说清楚：这不是真广播 —— 底层是逐个
+   * 点对点各发一遍，选 N 台就是 N 倍上行带宽。所以大文件多播前会先确认一次。
+   */
   function selectTarget(peer) {
-    state.target = peer;
-    $('target-name').textContent = peer.name;
-    $('send-panel').hidden = false;
+    if (!peer) return;
+    if (state.targets.has(peer)) state.targets.delete(peer);
+    else state.targets.add(peer);
     renderPeers();
-    $('send-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    if (state.targets.size) {
+      $('send-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }
+
+  /** 全选 / 全不选 */
+  function selectAllTargets() {
+    const peers = signaling ? signaling.peerList().filter((p) => p.state !== 'closed') : [];
+    if (!peers.length) { toast('还没有其他设备'); return; }
+    const allIn = peers.every((p) => state.targets.has(p));
+    state.targets.clear();
+    if (!allIn) for (const p of peers) state.targets.add(p);
+    renderPeers();
   }
 
   function clearTarget() {
-    state.target = null;
-    $('send-panel').hidden = true;
+    state.targets.clear();
     renderPeers();
+  }
+
+  /** 可用的目标设备（已经断开的过滤掉） */
+  function selectedPeers() {
+    return [...state.targets].filter((p) => p.state !== 'closed');
+  }
+
+  /** 只刷新发送面板的文案，不碰设备列表 —— 免得和 renderPeers 互相递归 */
+  function syncTargetLabel() {
+    const list = [...state.targets];
+    $('send-panel').hidden = list.length === 0;
+    $('target-name').textContent = list.length === 0
+      ? '—'
+      : (list.length === 1 ? list[0].name : `${list.length} 台设备`);
+
+    const sub = $('target-sub');
+    if (sub) {
+      sub.hidden = list.length < 2;
+      if (list.length > 1) sub.textContent = '多播：' + list.map((p) => p.name).join('、');
+    }
+
+    const all = $('btn-select-all');
+    if (all) all.hidden = !(signaling && signaling.peers.size > 1);
   }
 
   /* ============================== 发送 ============================== */
 
-  function currentTarget() {
-    if (!state.target) { toast('请先选择一台设备'); return null; }
-    if (state.target.state === 'closed') { toast('对方已断开'); return null; }
-    return state.target;
+  function currentTargets() {
+    const list = selectedPeers();
+    if (!list.length) { toast('请先选择设备'); return null; }
+    return list;
   }
 
   async function sendFiles(files) {
-    const peer = currentTarget();
-    if (!peer) return;
+    const peers = currentTargets();
+    if (!peers) return;
     if (!files || !files.length) return;
-    await peer.sendFiles(files);
+
+    // 多播前先算总大小：上行带宽是 ×N，大文件必须先把代价说清楚
+    if (peers.length > 1) {
+      const total = Array.prototype.reduce.call(files, (a, f) => a + (f.size || 0), 0);
+      if (total > 64 * 1024 * 1024) {
+        const ok = window.confirm(
+          `要把 ${files.length} 个文件（合计 ${FD.formatBytes(total)}）同时发给 ${peers.length} 台设备。\n\n` +
+          `这是逐个直发，你的上行带宽会翻 ${peers.length} 倍，可能明显变慢。继续吗？`
+        );
+        if (!ok) return;
+      }
+    }
+
+    // 各目标并行发：每个 Peer 自己管发送队列和流控，互不阻塞
+    for (const p of peers) {
+      Promise.resolve(p.sendFiles(files)).catch((e) => {
+        toast(`发给 ${p.name} 失败：${e.message}`);
+      });
+    }
   }
 
   function sendText() {
-    const peer = currentTarget();
-    if (!peer) return;
+    const peers = currentTargets();
+    if (!peers) return;
     const input = $('text-input');
     const text = input.value.trim();
     if (!text) return;
-    peer.sendText(text);
+    for (const p of peers) p.sendText(text);
     input.value = '';
   }
 
@@ -402,7 +471,7 @@
         if (ev === 'peer-joined' || ev === 'peer-added') {
           const peer = signaling.peer(p.peerId || (p.peer && p.peer.id));
           // 只有一个设备时自动选中，少点一步
-          if (peer && signaling.peers.size === 1 && !state.target) selectTarget(peer);
+          if (peer && signaling.peers.size === 1 && !state.targets.size) selectTarget(peer);
         }
         break;
       case 'peer-renamed':
@@ -416,11 +485,8 @@
             state._relayToastShown = true;
             toast('P2P 打不通，已自动切换为服务器中继');
           }
-          if (!state.target && signaling.peers.size === 1) selectTarget(peer);
+          if (!state.targets.size && signaling.peers.size === 1) selectTarget(peer);
           renderPeers();
-          if (state.target && state.target.id === p.peerId) {
-            $('target-name').textContent = peer.name;
-          }
         }
         break;
       }
@@ -645,13 +711,16 @@
       dz.addEventListener(t, (e) => { e.preventDefault(); dz.classList.remove('dragover'); })
     );
     dz.addEventListener('drop', (e) => {
+      // 必须挡住冒泡：下面 document 上还有一个"页面别处也能拖放"的处理器，
+      // 不挡的话拖到虚线框里会**触发两次 sendFiles**，对方会收到两份请求。
+      e.stopPropagation();
       if (e.dataTransfer && e.dataTransfer.files.length) sendFiles(e.dataTransfer.files);
     });
     // 页面别处也允许拖放
     document.addEventListener('dragover', (e) => e.preventDefault());
     document.addEventListener('drop', (e) => {
       e.preventDefault();
-      if (e.dataTransfer && e.dataTransfer.files.length && state.target) {
+      if (e.dataTransfer && e.dataTransfer.files.length && state.targets.size) {
         sendFiles(e.dataTransfer.files);
       }
     });
@@ -663,6 +732,7 @@
     });
 
     $('btn-clear-target').addEventListener('click', clearTarget);
+    $('btn-select-all').addEventListener('click', selectAllTargets);
     $('btn-clear-activity').addEventListener('click', () => {
       $('activity-list').textContent = '';
       activities.clear();

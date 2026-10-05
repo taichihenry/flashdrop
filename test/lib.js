@@ -183,6 +183,8 @@ async function launch(o) {
     `--window-size=${o.width || 1000},${o.height || 800}`,
   ];
   if (o.headless !== false) args.push('--headless=new', '--disable-gpu');
+  // 额外参数，用于复现特定网络环境（例如 --disable-ipv6 强制走 IPv4）
+  if (Array.isArray(o.extraArgs)) args.push(...o.extraArgs);
   args.push(o.url);
 
   const proc = spawn(chrome, args, { stdio: 'ignore', detached: false });

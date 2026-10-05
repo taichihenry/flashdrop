@@ -128,6 +128,8 @@ async function startServer() {
     env: {
       ...process.env,
       TRUST_PROXY: '1',        // 关键：信任反代注入的来源 IP
+      // 只认连接地址分房，忽略浏览器自己上报的出口地址（同上：否则伪造的 IP 会被顶掉）
+      IGNORE_REPORTED_ADDR: '1',
       NO_TLS: '1',
       PORT: String(SRV_PORT),
       PYTHONIOENCODING: 'utf-8',

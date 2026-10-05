@@ -74,8 +74,12 @@
   <section id="send-panel" class="card" hidden>
     <div class="card-head">
       <h2>发送给 <span id="target-name" class="target">—</span></h2>
-      <button id="btn-clear-target" class="btn btn-ghost btn-sm">取消选择</button>
+      <div class="head-actions">
+        <button id="btn-select-all" class="btn btn-ghost btn-sm" hidden>全选</button>
+        <button id="btn-clear-target" class="btn btn-ghost btn-sm">取消选择</button>
+      </div>
     </div>
+    <p id="target-sub" class="sub" hidden></p>
 
     <div id="dropzone" class="dropzone" tabindex="0" role="button">
       <svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true">

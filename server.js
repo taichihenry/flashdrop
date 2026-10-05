@@ -103,6 +103,43 @@ function isPrivateIpv4(ip) {
 }
 
 /**
+ * 校验前端上报的出口地址，合法才采纳。
+ *
+ * 为什么需要前端上报：双栈网络里「这次连接走 IPv4 还是 IPv6」由浏览器的
+ * Happy Eyeballs 决定，结果不稳定 —— 实测同一台电脑上两个浏览器会一个走
+ * IPv4、一个走 IPv6 连进来，被分进两个房间，互相看不见。前端用 STUN 探出
+ * 自己的全部出口地址（优先公网 IPv6）上报，分房就与协议无关了。
+ *
+ * 只收公网地址：私网 / 回环 / 链路本地 / ULA 一律拒绝，否则任何人都能自报
+ * 一个地址混进别人的房间。
+ *
+ * @param {unknown} reported
+ * @returns {string|null}
+ */
+function acceptedReportedAddr(reported) {
+  if (typeof reported !== 'string') return null;
+  const a = reported.trim();
+  if (!a || a.length > 64) return null;
+
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(a)) {
+    if (a.split('.').some((n) => Number(n) > 255)) return null;
+    return isPrivateIpv4(a) ? null : a;
+  }
+
+  if (a.indexOf(':') >= 0) {
+    const low = a.toLowerCase();
+    if (!/^[0-9a-f:]+$/.test(low)) return null;
+    if (low.startsWith('fe80')) return null;
+    if (low.startsWith('fc') || low.startsWith('fd')) return null;
+    if (low === '::1' || low === '::') return null;
+    if (!/^[23][0-9a-f]{3}:/.test(low)) return null;
+    return low;
+  }
+
+  return null;
+}
+
+/**
  * 从给手机用的局域网地址里，反推出"本机所在的局域网房间"。
  * 例：['https://192.168.1.5:8687'] → 'lan:192.168.1'
  */
@@ -188,6 +225,7 @@ class SignalingServer {
   /**
    * @param {object} conf
    * @param {boolean} conf.trustProxy 是否信任 X-Forwarded-For（反代部署时才开）
+   * @param {boolean} conf.ignoreReportedAddr 忽略前端上报的出口地址，只按连接地址分房
    * @param {boolean} conf.wsRelay    是否允许 P2P 失败时退回服务器中继
    * @param {string[]} conf.lanUrls   给手机用的局域网地址，注入到 /api/info
    * @param {number} conf.httpPort
@@ -196,7 +234,10 @@ class SignalingServer {
    */
   constructor(conf = {}) {
     this.conf = Object.assign(
-      { trustProxy: false, wsRelay: true, lanUrls: [], httpPort: null, httpsPort: null, tls: false },
+      {
+        trustProxy: false, ignoreReportedAddr: false, wsRelay: true,
+        lanUrls: [], httpPort: null, httpsPort: null, tls: false,
+      },
       conf
     );
 
@@ -294,9 +335,21 @@ class SignalingServer {
     if (!msg || typeof msg.type !== 'string') return;
 
     switch (msg.type) {
+      // 客户端主动保活（云端版没有服务端心跳，靠它撑住 Cloudflare 的 100 秒空闲超时）
+      case 'ping': this._send(peer, { type: 'pong' }); break;
       case 'pong': peer.lastPong = Date.now(); break;
 
-      case 'join-lan-room': this._joinRoom(peer, peer.ipRoom, 'lan'); break;
+      case 'join-lan-room': {
+        // 优先按前端探测到的公网地址分房（解决 IPv4/IPv6 双栈分裂），
+        // 探测失败就退回按连接地址分房。
+        //
+        // ignoreReportedAddr 时一律只认连接地址 —— 上报值毕竟是客户端说了算的，
+        // 放在严格信任反代头的部署里，等于把分房依据交给客户端。
+        const reported = this.conf.ignoreReportedAddr ? null : acceptedReportedAddr(msg.addr);
+        const roomId = reported ? roomIdForIp(reported, this.localRoomId) : peer.ipRoom;
+        if (roomId) this._joinRoom(peer, roomId, 'lan');
+        break;
+      }
 
       case 'create-room': {
         const roomId = 'pub:' + randomRoomCode(5);
@@ -359,11 +412,18 @@ class SignalingServer {
   /* ------------------------ 房间管理 ------------------------ */
 
   _joinRoom(peer, roomId, roomType) {
-    if (!this.rooms.has(roomId)) this.rooms.set(roomId, new Map());
-    const room = this.rooms.get(roomId);
+    // 已在房里：先退出，保证其他端不会收到"先 left 后 joined"的乱序。
+    //
+    // ⚠ 这一步可能把**整间房**从索引里删掉（房里只剩它自己时就会），
+    // 所以下面绝不能复用 leave 之前拿到的那个 Map 引用 —— 那样拿到的是个
+    // 已经脱钩的"孤儿 Map"：peer 以为自己进了房、this.rooms 里却查不到，
+    // 表现就是「两端都在同一间房，却永远互相看不见」，而且不报任何错。
+    if (this.rooms.get(roomId) && this.rooms.get(roomId).has(peer.id)) {
+      this._leaveRoom(peer, roomId);
+    }
 
-    // 已在房里：先退出，保证其他端不会收到"先 left 后 joined"的乱序
-    if (room.has(peer.id)) this._leaveRoom(peer, roomId);
+    let room = this.rooms.get(roomId);
+    if (!room) { room = new Map(); this.rooms.set(roomId, room); }
 
     const existing = [];
     for (const other of room.values()) existing.push(this._info(other));

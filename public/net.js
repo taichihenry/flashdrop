@@ -26,9 +26,120 @@
   const BUFFER_HIGH = 4 * 1024 * 1024;       // 发送缓冲超过它就暂停
   const BUFFER_LOW = 512 * 1024;             // 降到它就继续
   const P2P_TIMEOUT_MS = 6000;               // P2P 握手超时 → 降级
+  // 信令保活间隔。必须小于 Cloudflare 的 WebSocket 空闲超时（100 秒），
+  // 留足余量取 75 秒。只在页面前台可见时才发（见 _startHeartbeat）。
+  const HEARTBEAT_MS = 75 * 1000;
+  // 中继背压：WebSocket 没有 bufferedamountlow 事件，只能轮询。
+  const RELAY_DRAIN_POLL_MS = 12;            // 轮询间隔
+  const RELAY_DRAIN_TIMEOUT_MS = 20 * 1000;  // 兜底上限，网络真断了也别死等
+  const RELAY_KX_TIMEOUT_MS = 4000;          // 中继端到端加密协商超时 → 退回明文
+  const RELAY_PENDING_MAX = 32 * 1024 * 1024; // 密钥就绪前最多缓存多少字节
   const SIGNAL_BUFFER_TTL = 10000;           // 未知设备信令缓存 10 秒
   const MAX_TEXT_LEN = 256 * 1024;           // 单条文字上限
   const STREAM_TO_DISK_THRESHOLD = 64 * 1024 * 1024; // 超过 64 MB 才提示选目录
+
+  /* ============================== 出口地址探测 ============================== */
+
+  /**
+   * 判断一个地址是不是「公网」的，并把它归一成房间 key。
+   *
+   * 为什么要做这件事，见 probePublicAddr 的注释 —— 简单说：双栈网络里，
+   * 同一张网的两台设备可能一台用 IPv4、一台用 IPv6 连到服务器，服务器只能
+   * 看到「这次连接用的是哪个」，于是把它俩分进两个房间，互相看不见。
+   */
+
+  // 私网 / 回环 / 链路本地 / CGNAT，一律不算公网
+  const PRIVATE_V4 = /^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/;
+
+  function isPublicV4(a) {
+    return /^\d{1,3}(\.\d{1,3}){3}$/.test(a) && !PRIVATE_V4.test(a) && a !== '0.0.0.0';
+  }
+
+  function isPublicV6(a) {
+    if (!a || a.indexOf(':') < 0) return false;
+    const low = a.toLowerCase();
+    if (low.startsWith('fe80')) return false;            // 链路本地
+    if (low.startsWith('fc') || low.startsWith('fd')) return false; // ULA（私网）
+    if (low === '::1' || low === '::') return false;     // 回环 / 未指定
+    return /^[23][0-9a-f]{3}:/.test(low);                // 2000::/3 才是全球单播
+  }
+
+  /** IPv6 取 /64 前缀当房间 key —— 一个家庭/公司通常共享同一个 /64 */
+  function v6RoomPrefix(a) {
+    const parts = a.split(':');
+    while (parts.length < 4) parts.push('');
+    return parts.slice(0, 4).map((p) => p || '0').join(':') + '::';
+  }
+
+  /** 优先公网 IPv6（最精准），其次公网 IPv4 */
+  function pickRoomAddr(addrs) {
+    for (const a of addrs) if (isPublicV6(a)) return v6RoomPrefix(a);
+    for (const a of addrs) if (isPublicV4(a)) return a;
+    return null;
+  }
+
+  /**
+   * 用一次 STUN 探测，问出本机**所有**出口地址。
+   *
+   * 背景：服务器按出口 IP 分房（同一个网里的设备自动成房）。但双栈网络下，
+   * 「这次连接用 IPv4 还是 IPv6」由浏览器的 Happy Eyeballs 决定，结果不稳定 ——
+   * 实测同一台电脑上两个浏览器会一个走 IPv4、一个走 IPv6，被分进两个房间，
+   * 互相看不见（设备列表里就是没有对方）。
+   *
+   * 解法：让前端自己把出口地址问出来报给服务器，优先报公网 IPv6。
+   * 只要同一个网络里的设备都能报出同一个 IPv6 /64 前缀，它们就一定同房，
+   * 跟这次连的是 IPv4 还是 IPv6 完全无关。
+   *
+   * 失败或超时（STUN 被防火墙拦）就返回 null，服务器退回按连接地址分房，
+   * 不会比现在更差。
+   *
+   * @returns {Promise<string|null>} 形如 "2409:8a00:2612:2c90::" 或 "120.244.4.3"
+   */
+  function probePublicAddr(timeoutMs) {
+    const limit = timeoutMs || 1500;
+    return new Promise((resolve) => {
+      if (typeof window.RTCPeerConnection !== 'function') return resolve(null);
+
+      let pc = null;
+      let settled = false;
+      const addrs = new Set();
+
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { if (pc) pc.close(); } catch { /* noop */ }
+        resolve(pickRoomAddr(addrs));
+      };
+      const timer = setTimeout(finish, limit);
+
+      try {
+        pc = new RTCPeerConnection({
+          iceServers: [
+            { urls: 'stun:stun.cloudflare.com:3478' },
+            { urls: 'stun:stun.l.google.com:19302' },
+          ],
+        });
+      } catch {
+        clearTimeout(timer);
+        return resolve(null);
+      }
+
+      pc.onicecandidate = (e) => {
+        if (!e.candidate) return finish();          // null 候选 = 收集结束
+        const a = e.candidate.address;
+        if (!a) return;
+        addrs.add(a);
+        // 拿到公网 IPv6 就够了（最稳的判据），不必等满超时
+        if (isPublicV6(a)) finish();
+      };
+
+      pc.createDataChannel('probe');
+      pc.createOffer()
+        .then((o) => pc.setLocalDescription(o))
+        .catch(() => finish());
+    });
+  }
 
   /* ============================== 小工具 ============================== */
 
@@ -272,46 +383,361 @@
     }
   }
 
-  /** WebSocket 中继传输：P2P 打不通时的兜底，速度慢但一定能通 */
+  /* ============================== 中继端到端加密 ============================== */
+
+  /**
+   * 中继通道的端到端加密。
+   *
+   * 为什么必须做：P2P 直连时数据有 DTLS 端到端加密，就算接 TURN 也只是多一跳中转，
+   * 中转节点同样只看得到密文。但 WS 中继不一样 —— 数据在 Worker 里是**明文**的，
+   * 服务端事实上进了信任边界。对一个主打「不存储消息」的产品，这个口子必须堵上。
+   *
+   * 做法：两端各生成一对临时 ECDH(P-256) 密钥，公钥经中继互换（服务端看得见公钥，
+   * 但推不出共享密钥），再经 HKDF 派生 AES-256-GCM 密钥。此后所有中继数据都是密文，
+   * Worker 只是搬运工，读不懂内容。
+   *
+   * 原则：加密谈不拢也绝不能让文件传不动 —— 一律退回明文，只在界面上如实告知。
+   */
+
+  const KX_INFO = new TextEncoder().encode('flashdrop-relay-v1');
+  const ECDH_ALGO = { name: 'ECDH', namedCurve: 'P-256' };
+  const CRYPTO_OK = (() => {
+    try {
+      return !!(window.crypto && window.crypto.subtle && window.crypto.getRandomValues);
+    } catch (e) { return false; }
+  })();
+
+  /** 生成一对临时 ECDH 密钥，公钥导出成 raw(65B) 的 base64 */
+  async function kxGenerate() {
+    const pair = await crypto.subtle.generateKey(ECDH_ALGO, true, ['deriveBits']);
+    const raw = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
+    return { privateKey: pair.privateKey, publicB64: bytesToBase64(raw) };
+  }
+
+  /** 自己的私钥 + 对端公钥 → AES-256-GCM 密钥 */
+  async function kxDerive(privateKey, peerPublicB64) {
+    const peerKey = await crypto.subtle.importKey(
+      'raw', base64ToBytes(peerPublicB64), ECDH_ALGO, false, []
+    );
+    const bits = await crypto.subtle.deriveBits(
+      { name: 'ECDH', public: peerKey }, privateKey, 256
+    );
+    const hkdf = await crypto.subtle.importKey('raw', bits, 'HKDF', false, ['deriveKey']);
+    return crypto.subtle.deriveKey(
+      { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: KX_INFO },
+      hkdf,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['encrypt', 'decrypt']
+    );
+  }
+
+  /** AES-GCM 封装，输出 iv(12B) || 密文 的 base64 */
+  async function aeadSeal(key, plain) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plain));
+    const out = new Uint8Array(iv.length + ct.length);
+    out.set(iv, 0);
+    out.set(ct, iv.length);
+    return bytesToBase64(out);
+  }
+
+  async function aeadOpen(key, b64) {
+    const all = base64ToBytes(b64);
+    const pt = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: all.subarray(0, 12) }, key, all.subarray(12)
+    );
+    return new Uint8Array(pt);
+  }
+
+  /* ============================== WebSocket 中继 ============================== */
+
+  /**
+   * WebSocket 中继传输：P2P 打不通时的兜底，速度慢但一定能通。
+   *
+   * 中继协议（都放在 payload 里，用 kind 区分）：
+   *   kx     密钥交换，明文，只带公钥
+   *   enc    加密数据，内容为 iv || 密文
+   *   text   明文文字（对端不支持加密时的兼容路径）
+   *   binary 明文二进制（同上）
+   *
+   * 加密单元的格式：第 1 字节是类型标签（0=二进制，1=文字），其余是正文。
+   * 这样一次加密就能同时承载两种数据类型，不用套两层编码。
+   */
   class WsRelayTransport {
     constructor(opts) {
       this.kind = 'relay';
       this.opts = opts;
       this.closed = false;
-      this._queueTimer = null;
+
+      // --- 端到端加密状态 ---
+      this.encrypted = false;       // 密钥是否已就绪（供界面与诊断读取）
+      this._aes = null;             // 派生出的 AES 密钥
+      this._priv = null;            // 自己的临时 ECDH 私钥
+      this._peerPub = null;         // 对端公钥（base64）
+      this._kxStarted = false;
+      this._kxTimer = null;
+      this._plain = false;          // 已确定退回明文
+
+      // --- 缓冲 ---
+      this._pending = [];           // 密钥就绪前的出站数据
+      this._inbox = [];             // 密钥就绪前收到的密文
+      this._pendingBytes = 0;
+      this._inflightBytes = 0;      // 已交给加密链、还没写进 socket 的字节
+      this._chain = Promise.resolve();      // 出站串行链，保证密封顺序
+      this._recvChain = Promise.resolve();  // 入站串行链，保证解密顺序
+
       // 中继是"假连接"：信令通道本来就在，直接算已打开
       setTimeout(() => { if (!this.closed) opts.onOpen(); }, 0);
     }
 
     async handleSignal(msg) { /* 中继不需要 SDP/ICE */ }
 
-    sendText(str) {
-      this.opts.sendRelay({ type: 'relay', payload: { kind: 'text', data: str } });
-    }
+    /* ------------------------ 出站 ------------------------ */
+
+    sendText(str) { this._submit({ tag: 1, text: str }); }
 
     sendBinary(buf) {
       const u8 = buf instanceof ArrayBuffer ? new Uint8Array(buf) : buf;
-      this.opts.sendRelay({
-        type: 'relay',
-        payload: { kind: 'binary', data: bytesToBase64(u8) },
-      });
+      this._submit({ tag: 0, bytes: u8 });
     }
 
-    /** 中继一切都要 base64 编码后塞进 JSON，用它作为"缓冲量"来限速 */
-    bufferedAmount() { return 0; }
+    _unitSize(unit) {
+      return unit.tag === 0 ? unit.bytes.byteLength : unit.text.length;
+    }
 
-    drain() { return new Promise((r) => setTimeout(r, 24)); }
+    _submit(unit) {
+      if (this.closed) return;
+      const size = this._unitSize(unit);
+      this._inflightBytes += size;
 
-    isOpen() { return !this.closed; }
+      if (this._plain) {
+        this._emitPlain(unit);
+        this._inflightBytes -= size;
+        return;
+      }
+      if (this._aes) {
+        this._chain = this._chain.then(() => this._emitUnit(unit));
+        return;
+      }
+
+      // 密钥还没谈好：先排队，同时把协商推起来
+      this._pending.push(unit);
+      this._pendingBytes += size;
+      this._startKx();
+      if (this._plain) return;   // 协商当场就失败了，上面已经发出去
+
+      if (!this._kxTimer) {
+        this._kxTimer = setTimeout(() => {
+          if (this._aes || this._plain || this.closed) return;
+          this._fallbackToPlain('协商超时');
+        }, RELAY_KX_TIMEOUT_MS);
+      }
+      if (this._pendingBytes > RELAY_PENDING_MAX) {
+        this._fallbackToPlain('积压过多');
+      }
+    }
+
+    async _emitUnit(unit) {
+      const size = this._unitSize(unit);
+      try {
+        if (!this.closed && this._aes) {
+          const body = unit.tag === 0 ? unit.bytes : new TextEncoder().encode(unit.text);
+          const framed = new Uint8Array(1 + body.length);
+          framed[0] = unit.tag;
+          framed.set(body, 1);
+          this._rawSend({ kind: 'enc', data: await aeadSeal(this._aes, framed) });
+        }
+      } catch (e) {
+        // 加密出问题也不能丢数据：这一单元退回明文发
+        this._emitPlain(unit);
+      } finally {
+        this._inflightBytes = Math.max(0, this._inflightBytes - size);
+      }
+    }
+
+    _emitPlain(unit) {
+      if (unit.tag === 1) this._rawSend({ kind: 'text', data: unit.text });
+      else this._rawSend({ kind: 'binary', data: bytesToBase64(unit.bytes) });
+    }
+
+    _rawSend(payload) {
+      if (this.closed) return;
+      try { this.opts.sendRelay({ type: 'relay', payload }); } catch (e) { /* 连接已断 */ }
+    }
+
+    /* ------------------------ 密钥协商 ------------------------ */
+
+    _startKx() {
+      if (this._kxStarted || this._plain) return;
+      if (!CRYPTO_OK) { this._fallbackToPlain('浏览器不支持 WebCrypto'); return; }
+      this._kxStarted = true;
+
+      kxGenerate().then((kx) => {
+        if (this.closed || this._plain) return;
+        this._priv = kx.privateKey;
+        this._rawSend({ kind: 'kx', pub: kx.publicB64 });
+        this._tryDerive();
+      }).catch(() => this._fallbackToPlain('密钥生成失败'));
+    }
+
+    _onKx(pubB64) {
+      if (this._plain || typeof pubB64 !== 'string' || !pubB64) return;
+      this._peerPub = pubB64;
+      // 对端可能是先发起的那一方，我们也得把自己的公钥送过去
+      this._startKx();
+      this._tryDerive();
+    }
+
+    async _tryDerive() {
+      if (this._aes || this._plain || !this._priv || !this._peerPub) return;
+
+      let key;
+      try {
+        key = await kxDerive(this._priv, this._peerPub);
+      } catch (e) {
+        this._fallbackToPlain('密钥协商失败');
+        return;
+      }
+      if (this.closed) return;
+
+      this._aes = key;
+      this._priv = null;              // 私钥用完即弃，不留在内存里
+      this._pendingBytes = 0;
+      this.encrypted = true;
+      clearTimeout(this._kxTimer);
+      this._kxTimer = null;
+
+      // 对端可能比我们更早派生完 —— 先把已经收到的密文排进解密队列
+      const inbox = this._inbox;
+      this._inbox = [];
+      for (const data of inbox) this._queueDecrypt(data);
+
+      // 再把积压的出站数据按原顺序排进加密发送链
+      const pending = this._pending;
+      this._pending = [];
+      for (const unit of pending) this._chain = this._chain.then(() => this._emitUnit(unit));
+
+      this._notice('ok', '中继通道已启用端到端加密（服务端只见密文）');
+    }
+
+    _fallbackToPlain(reason) {
+      if (this._plain || this._aes) return;
+      this._plain = true;
+      this.encrypted = false;
+      clearTimeout(this._kxTimer);
+      this._kxTimer = null;
+
+      const pending = this._pending;
+      this._pending = [];
+      this._pendingBytes = 0;
+      for (const unit of pending) {
+        this._emitPlain(unit);
+        this._inflightBytes = Math.max(0, this._inflightBytes - this._unitSize(unit));
+      }
+
+      const lost = this._inbox.length;
+      this._inbox = [];
+      this._notice('warn', lost
+        ? `中继加密不可用（${reason}），已退回明文；有 ${lost} 段数据未能解密`
+        : `中继加密不可用（${reason}），已退回明文传输`);
+    }
+
+    _notice(level, text) {
+      if (this.opts.onNotice) this.opts.onNotice(level, text);
+    }
+
+    /* ------------------------ 入站 ------------------------ */
 
     /** 由 Peer 把中继回来的数据喂进来 */
     deliver(payload) {
-      if (payload.kind === 'text') this.opts.onMessage(payload.data);
-      else this.opts.onMessage(base64ToBytes(payload.data).buffer);
+      if (!payload || typeof payload !== 'object') return;
+
+      if (payload.kind === 'kx') { this._onKx(payload.pub); return; }
+
+      // 对端是旧版本（不认识 kx/enc）：立刻退回明文，别让数据卡在队列里
+      if (payload.kind === 'text' || payload.kind === 'binary') {
+        if (!this._plain && !this._aes) this._fallbackToPlain('对端未启用加密');
+        if (payload.kind === 'text') this.opts.onMessage(payload.data);
+        else this.opts.onMessage(base64ToBytes(payload.data).buffer);
+        return;
+      }
+
+      if (payload.kind === 'enc') this._queueDecrypt(payload.data);
     }
+
+    /**
+     * 解密必须串行。
+     *
+     * crypto.subtle.decrypt 是异步的，并行发出去的话**回调顺序不保证**，
+     * 一旦乱序，文件分片就会被拼错 —— 而且校验和照样能过，只是内容是坏的。
+     * 所以这里用一条 Promise 链把入站严格排队。
+     */
+    _queueDecrypt(data) {
+      if (typeof data !== 'string') return;
+      if (!this._aes) {
+        // 对端比我们早派生完，先收着（设上限防止被灌爆）
+        this._inbox.push(data);
+        if (this._inbox.length > 512) this._inbox.shift();
+        return;
+      }
+      this._recvChain = this._recvChain.then(() => this._openEnc(data));
+    }
+
+    async _openEnc(data) {
+      let framed;
+      try {
+        framed = await aeadOpen(this._aes, data);
+      } catch (e) {
+        this._notice('warn', '中继密文解密失败，已丢弃一段数据');
+        return;
+      }
+      const tag = framed[0];
+      const body = framed.subarray(1);
+      if (tag === 1) this.opts.onMessage(new TextDecoder().decode(body));
+      else this.opts.onMessage(body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength));
+    }
+
+    /* ------------------------ 流控 ------------------------ */
+
+    /**
+     * 真实的可写水位。
+     *
+     * 以前这里直接 `return 0`，于是 Peer 里的
+     * `if (transport.bufferedAmount() > BUFFER_HIGH) await drain()` 永远不成立，
+     * 中继模式下等于完全没有背压，8 MB 分区会一口气全灌进 socket。
+     * 现在把信令 WebSocket 的真实 bufferedAmount 暴露出来，再加上还没密封完的字节。
+     */
+    bufferedAmount() {
+      const ws = this.opts.getBufferedAmount ? this.opts.getBufferedAmount() : 0;
+      return (Number(ws) || 0) + this._inflightBytes;
+    }
+
+    /** WebSocket 没有 bufferedamountlow 事件，只能轮询等水位降下来 */
+    drain() {
+      return new Promise((resolve) => {
+        const startedAt = Date.now();
+        const tick = () => {
+          if (this.closed) return resolve();
+          if (this.bufferedAmount() <= BUFFER_LOW) return resolve();
+          if (Date.now() - startedAt > RELAY_DRAIN_TIMEOUT_MS) return resolve();
+          setTimeout(tick, RELAY_DRAIN_POLL_MS);
+        };
+        setTimeout(tick, RELAY_DRAIN_POLL_MS);
+      });
+    }
+
+    isOpen() { return !this.closed; }
 
     destroy() {
       this.closed = true;
+      clearTimeout(this._kxTimer);
+      this._kxTimer = null;
+      this._pending = [];
+      this._inbox = [];
+      this._pendingBytes = 0;
+      this._aes = null;
+      this._priv = null;
     }
   }
 
@@ -372,7 +798,17 @@
         onMessage: (data) => this._onTransportMessage(data),
         onClose: () => this._onTransportClose(),
         onFail: (reason) => this._degradeToRelay(reason),
+        // 中继传输要用到这两个：真实写水位（背压）和面向用户的提示
+        getBufferedAmount: () => this._sigBuffered(),
+        onNotice: (level, text) => this.emit('notice', { level, text }),
       };
+
+      // 调试开关：强制走中继，用来验证中继链路（端到端加密、背压、流控）。
+      // 只有显式设置这个全局变量才会生效，普通用户碰不到。
+      if (window.FD_FORCE_RELAY) {
+        this.transport = new WsRelayTransport(common);
+        return;
+      }
 
       // 注意：某些浏览器在非安全上下文里 RTCPeerConnection 存在但一 new 就抛错，
       // 所以这里必须 try 一下，抛了就当场退到中继，不能让整个 Peer 挂在构造阶段。
@@ -459,8 +895,16 @@
         onOpen: () => this._onTransportOpen(),
         onMessage: (data) => this._onTransportMessage(data),
         onClose: () => this._onTransportClose(),
+        getBufferedAmount: () => this._sigBuffered(),
+        onNotice: (level, text) => this.emit('notice', { level, text }),
       });
       this.emit('peer-state', { peerId: this.id, state: 'switching', reason });
+    }
+
+    /** 信令 socket 当前积压的字节数，中继模式拿它当背压依据 */
+    _sigBuffered() {
+      const ws = this.signaling && this.signaling.ws;
+      return ws ? (Number(ws.bufferedAmount) || 0) : 0;
     }
 
     _onTransportOpen() {
@@ -943,6 +1387,11 @@
       this._pendingRoom = null;
       this._reconnectDelay = 800;
       this._closedByUser = false;
+      this._hbTimer = null;            // 信令保活定时器
+
+      // 出口地址探测。与信令连接并行跑（不阻塞），进房间时会等它的结果。
+      this._addrProbe = probePublicAddr();
+      this._probedAddr = null;
 
       this._connect();
     }
@@ -959,6 +1408,34 @@
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
       const path = typeof window.FD_WS_PATH === 'string' ? window.FD_WS_PATH : '/ws';
       return `${proto}//${location.host}${path}`;
+    }
+
+    /**
+     * 信令保活。
+     *
+     * 为什么必须有：Cloudflare 对 WebSocket 有 **100 秒空闲超时**（期间没有
+     * 任何数据帧就断开）。而 FlashDrop 的服务端刻意不做 setInterval 心跳
+     * （怕不停唤醒 Durable Object 烧额度），客户端也只是被动回 pong ——
+     * 也就是双方都不主动说话。结果用户只要挂着页面不动，信令就会在 100 秒后
+     * 被平台掐断；而 ws.onclose 又会把 peers 全部销毁，**正在传的文件当场中断**。
+     * 表现出来就是：「两台设备明明互相看得见，就是传不过去」。
+     *
+     * 这里做了两个克制：
+     *   1. 只在页面**前台可见**时才发 —— 用户切走了就没必要占着连接，切回来会
+     *      自动重连；这也把 Durable Object 的唤醒次数压到最低。
+     *   2. 只在连接确实是 OPEN 时才发，避免往一个已死的 socket 里灌数据。
+     */
+    _startHeartbeat() {
+      this._stopHeartbeat();
+      this._hbTimer = setInterval(() => {
+        if (this._closedByUser) return;
+        if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) this.send({ type: 'ping' });
+      }, HEARTBEAT_MS);
+    }
+
+    _stopHeartbeat() {
+      if (this._hbTimer) { clearInterval(this._hbTimer); this._hbTimer = null; }
     }
 
     /**
@@ -996,9 +1473,12 @@
     _connect() {
       const ws = new WebSocket(this._url());
       this.ws = ws;
+      // 新连接 = 入房闸门重新打开（否则重连后就再也进不了房了）
+      this._lanJoinPending = false;
 
       ws.onopen = () => {
         this._reconnectDelay = 800;
+        this._startHeartbeat();
         this.emit('signaling-open', {});
         // 重连后把之前的房间和配对统统重放一遍
         if (this._joinedRoom) this.joinLanRoom();
@@ -1013,6 +1493,7 @@
       };
 
       ws.onclose = () => {
+        this._stopHeartbeat();
         this.emit('signaling-closed', {});
         for (const [, p] of this.peers) p.destroy();
         this.peers.clear();
@@ -1027,14 +1508,48 @@
     send(obj) {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(JSON.stringify(obj));
+        return true;
       }
+      return false;   // 没发出去，调用方可以据此重试
     }
 
     /* ---------- 对外操作 ---------- */
 
+    /**
+     * 进「同一个网络的设备」房间。
+     *
+     * 不把地址写死，而是等一次出口地址探测（最多 1.5 秒）再入房：带上探测到的
+     * 公网地址，服务器就能按**真实网络**而不是**这次连接用的协议**来分房。
+     * 探测没结果就照常入房，服务器退回按连接地址分房，行为不比以前差。
+     */
     joinLanRoom() {
       this._joinedRoom = true;
-      this.send({ type: 'join-lan-room' });
+
+      // 同一条连接上只排一次入房。
+      //
+      // 为什么必须挡：main() 会在信号 socket 刚建好（还没 open）时调一次这里，
+      // 而 socket 的 onopen 看到 _joinedRoom 已经为真又会重放一次 —— 于是
+      // join-lan-room 被发了两遍。服务端 _joinRoom 对"已在房里"的处理是
+      // 先 leave 再 join，而 leave 在房间变空时会把**整间房从索引里删掉**，
+      // 紧接着那次 join 拿到的是个已经脱钩的对象 —— 结果就是
+      // 「两端都显示在同一间房，却永远互相看不见」，而且看起来毫无报错。
+      if (this._lanJoinPending) return;
+      this._lanJoinPending = true;
+
+      const send = () => {
+        const sent = this.send(
+          this._probedAddr
+            ? { type: 'join-lan-room', addr: this._probedAddr }
+            : { type: 'join-lan-room' }
+        );
+        // socket 还没 open 就等于白发：放开闸门，交给 onopen 重放
+        if (!sent) this._lanJoinPending = false;
+      };
+
+      const probe = this._addrProbe || Promise.resolve(null);
+      probe
+        .then((addr) => { this._probedAddr = addr; send(); })
+        .catch(() => { this._probedAddr = null; send(); });
     }
 
     createRoom() { this.send({ type: 'create-room' }); }
@@ -1233,6 +1748,7 @@
     hasFileSystemAccess,
     memoryReceiveLimit,
     memoryReceiveRisk,
+    probePublicAddr,
     constants: { CHUNK_SIZE, PARTITION_SIZE, BUFFER_HIGH, P2P_TIMEOUT_MS },
   };
 })();
