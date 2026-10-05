@@ -297,6 +297,20 @@ main {
   padding: 14px 6px 6px;
 }
 
+/* 「附近设备」空状态里补一条跨网络的出路。
+   背景：自动发现是按公网 IP 分房的，所以扫码只能发现**同一个网络**下的设备。
+   电脑连 Wi-Fi、手机用流量时，两边房间不同，这里会一直是空的 ——
+   用户就会以为「扫了没反应」。必须给一个明确的下一步。 */
+.empty-wan {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed #e2e8f0;
+}
+.empty-wan button {
+  display: block;
+  margin: 9px auto 0;
+}
+
 /* ---------------- 发送区 ---------------- */
 
 .dropzone {

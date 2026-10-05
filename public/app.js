@@ -754,6 +754,9 @@
 
     // 配对
     $('btn-pair').addEventListener('click', openPair);
+    // 空状态里的「开始配对」——跨网络用户唯一能走通的路，必须一步点到
+    const emptyPair = $('btn-empty-pair');
+    if (emptyPair) emptyPair.addEventListener('click', openPair);
     $('btn-pair-close').addEventListener('click', closeModal);
     $('btn-pair-join').addEventListener('click', () => {
       const code = $('pair-input').value.trim();

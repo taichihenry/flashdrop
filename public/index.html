@@ -51,9 +51,9 @@
           <button id="btn-copy-url" class="btn btn-ghost btn-sm">复制</button>
         </div>
         <ol class="steps" id="connect-steps">
-          <li>用<b>另一台设备</b>的相机或浏览器扫左侧二维码</li>
-          <li>两边会自动互相「看见」，点一下对方的名字就能发送</li>
-          <li>不在同一个网络的（比如一台连 Wi-Fi、一台用流量）：一端点顶部<b>配对</b>拿到 6 位码，另一端输码即可跨网络互传</li>
+          <li><b>两台设备在同一个 Wi-Fi 下</b>：用另一台的相机扫左侧二维码，两边会自动互相「看见」</li>
+          <li><b>不在同一个网络</b>（比如电脑连 Wi-Fi、手机用流量）：<b>光扫码是看不到对方的</b>，要点顶部<b>配对</b> —— 一端出 6 位码，另一端输码（或扫配对二维码）即可跨网络互传</li>
+          <li>点一下对方的名字，就能发文字和文件</li>
         </ol>
         <div id="secure-hint" class="notice" hidden></div>
       </div>
@@ -67,7 +67,13 @@
       <span id="room-badge" class="badge" hidden></span>
     </div>
     <div id="peer-list" class="peer-grid"></div>
-    <p id="peers-empty" class="empty">还没有其他设备。<br>把上面的二维码给另一台设备扫一下，或让它打开同一个地址。</p>
+    <div id="peers-empty" class="empty">
+      还没有其他设备。<br>把上面的二维码给 <b>同一个 Wi-Fi 下</b>的设备扫一下，或让它打开同一个地址。
+      <div class="empty-wan">
+        两台设备<b>不在同一个网络</b>？<br>光扫码看不到对方 —— 在两端各点一次顶部「配对」，用 6 位配对码连接。
+        <button id="btn-empty-pair" class="btn btn-primary btn-sm" type="button">开始配对</button>
+      </div>
+    </div>
   </section>
 
   <!-- 发送区 -->
