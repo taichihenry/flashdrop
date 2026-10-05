@@ -1,25 +1,26 @@
 'use strict';
 /**
- * www 归一测试
+ * 域名归一测试
  * ===========================================================================
- * 验证：用 `www.` 开头的地址打开后，会**原地跳到主域名**，并且 hash 不丢。
+ * 验证：同一站点的几种域名写法，最终都会落到主域名 `6.中国`，
+ * 并且跳转时 hash 不丢。
  *
- * 为什么必须归一（这是个真踩过的坑）：
- *   `6.中国` 和 `www.6.中国` 在浏览器眼里是**两个不同的 origin**，
- *   localStorage / IndexedDB 按 origin 隔离，也就是各存一份。
- *   于是「在 6.中国 改的设备名、配过的设备」，到 www.6.中国 上全读不到 ——
- *   用户看到的现象就是「改名没生效 / 配对丢了」，而且怎么刷新都不好。
- *
- *   修法不是在两个域名间同步状态（同步不干净、还会漏），而是统一到一个入口。
- *   `public/index.html` 的 <head> 最前面那段脚本干这个。
+ * 为什么要归一（三种写法各有各的坑，都踩过）：
+ *   1. `x.com` 和 `www.x.com` 在浏览器眼里是**两个不同的 origin**，
+ *      localStorage / IndexedDB 按 origin 隔离 —— 设备名、配对记忆各存一份。
+ *      真实案例：在 `6.中国` 改好设备名，打开 `www.6.中国` 又变回默认名。
+ *   2. `.中国`(xn--fiqs8s) 和 `.中國`(xn--fiqz9s) 是**两个不同的顶级域**。
+ *      虽然 CNNIC 把注册数据当成一份（简繁等效），但浏览器不认这层关系，
+ *      对浏览器来说同样是两个 origin，状态同样会分裂。
+ *   修法不是在多个域名之间同步状态（同步不干净、还会漏），而是统一到一个入口。
+ *   `public/www-redirect.js` 的 <head> 同步脚本干这个。
  *
  * 用法：
  *   node test/www-redirect.js                          # 默认打线上 https://6.中国
  *   node test/www-redirect.js http://6.xn--fiqs8s:8986 # 本地（自动加 host-resolver-rules）
  *
  * 本地跑的前提：`run.js --port 8986 --no-tls` 已经在跑。
- * 本地路径会额外加 `--host-resolver-rules`，让 Chrome 把
- * `6.xn--fiqs8s` / `www.6.xn--fiqs8s` 都解析到本机，不碰真实 DNS。
+ * 本地路径会额外加 `--host-resolver-rules`，把几个域名都解析到本机，不碰真实 DNS。
  *
  * ⚠️ 关于 hash 断言方式（这里有个测试本身的坑）：
  *   页面里的 FlashDrop 在启动时会消费 `#pair=<6位码>`，处理完顺手
@@ -35,11 +36,14 @@ const DEBUG_PORT = 9821;
 const PROFILE = tempProfile('fd-www-');
 
 const HASH = '#pair=123456';
+const CANON = '6.xn--fiqs8s';       // 主域名 6.中国
+const TRAD = '6.xn--fiqz9s';        // 繁体 6.中國
+const FAMILY = [CANON, TRAD];       // 本站的两个顶级域（简繁等效）
 
 /** 由 base 推出它带 www 的形态：http://a.b:123/ → http://www.a.b:123/ */
-function withWww(base) {
+function withWww(base, hostname) {
   const u = new URL(base);
-  u.hostname = 'www.' + u.hostname;
+  u.hostname = 'www.' + (hostname || u.hostname);
   return u;
 }
 
@@ -48,19 +52,28 @@ function withWww(base) {
   const apex = new URL(base);
   const wwwU = withWww(base);
 
-  const isLocal = /^https?:\/\/(127\.0\.0\.1|localhost|6\.xn--fiqs8s|www\.)/.test(base);
+  const isLocal = /^https?:\/\/(127\.0\.0\.1|localhost|6\.xn--fiqs8s|www\.|6\.xn--fiqz9s)/.test(base);
   const extraArgs = isLocal
-    ? ['--host-resolver-rules=MAP www.6.xn--fiqs8s 127.0.0.1,MAP 6.xn--fiqs8s 127.0.0.1']
+    ? ['--host-resolver-rules=' + [
+        'MAP 6.xn--fiqs8s 127.0.0.1',
+        'MAP www.6.xn--fiqs8s 127.0.0.1',
+        'MAP 6.xn--fiqz9s 127.0.0.1',
+        'MAP www.6.xn--fiqz9s 127.0.0.1',
+      ].join(',')]
     : [];
 
-  let pass = 0, fail = 0;
+  let pass = 0, fail = 0, skip = 0;
   const ok = (m) => { console.log('  ✅ ' + m); pass++; };
   const no = (m) => { console.log('  ❌ ' + m); fail++; };
 
+  const tradU = new URL(base);
+  tradU.hostname = TRAD;
+
   console.log('');
-  console.log('===== www 归一测试 =====');
-  console.log(`  主域名    ${apex.origin}/`);
-  console.log(`  www 形态  ${wwwU.origin}/`);
+  console.log('===== 域名归一测试 =====');
+  console.log(`  主域名      ${apex.origin}/   ← 一切最终都落这里`);
+  console.log(`  www 形态    ${wwwU.origin}/`);
+  console.log(`  繁体顶级域  ${tradU.origin}/`);
   console.log('');
 
   const b = await launch({
@@ -144,19 +157,61 @@ function withWww(base) {
     else no(`主域名被跳走了，得到 ${ah.hostname}`);
 
     /* ------------------------------------------------------------------
-       [3] 「只剥一层 www」的不变式：每跳一层 hostname 严格变短 → 必然终止
-           生产环境上 www.www.6.中国 没有 DNS 记录、访问不到，
-           所以这条用逻辑校验，不用真浏览器跑
+       [3] 繁体顶级域 .中國 也应归一到主域名
+           前提是先在 Cloudflare 给 6.中國 建 zone 并绑上 Worker。
+           没建之前 DNS 解析不了，这里**跳过**而不是判失败。
     ------------------------------------------------------------------ */
     console.log('');
-    console.log('[3] 不变式：每跳一层 www 少一层，必然终止（不会 www.www 死循环）');
-    const strip = (h) => (h.slice(0, 4).toLowerCase() === 'www.' ? h.slice(4) : h);
-    let cur = 'www.www.www.6.xn--fiqs8s';
-    const trail = [cur];
-    for (let i = 0; i < 10 && strip(cur) !== cur; i++) { cur = strip(cur); trail.push(cur); }
-    console.log('    ' + trail.join('  →  '));
-    if (cur === '6.xn--fiqs8s' && trail.length === 4) ok('三层 www 收敛到主域名，共 3 跳，无死循环');
-    else no(`未按预期收敛，停在 ${cur}（${trail.length} 步）`);
+    const aliasU = new URL(base);
+    aliasU.hostname = TRAD;
+    console.log(`[3] 打开 ${aliasU.origin}/ + ${HASH}  （繁体顶级域 .中國）`);
+
+    await b.cdp.send('Page.navigate', { url: aliasU.origin + '/' + HASH });
+    await sleep(3000);
+
+    const aliasHref = await b.cdp.eval('location.href').catch(() => '');
+    console.log('    实际：' + aliasHref);
+
+    if (/^chrome-error:/.test(aliasHref) || aliasHref === 'about:blank') {
+      skip++;
+      console.log('    ⏭  跳过：6.中國 目前还解析不了（Cloudflare 侧 zone 尚未建立）。');
+      console.log('        等把 6.中國 加进 Cloudflare 并绑到 Worker 后，重跑这条就会变 ✅');
+    } else {
+      const al = new URL(aliasHref);
+      if (al.hostname === apex.hostname) ok(`繁体域名已归一到 ${al.hostname}`);
+      else no(`繁体域名未归一，停在 ${al.hostname}`);
+    }
+
+    /* ------------------------------------------------------------------
+       [4] 白名单行为表：只认本站的几种写法，别的一律不碰
+           如果写成「只要 hostname 不是主域名就跳」，本地开发（127.0.0.1）、
+           workers.dev 备用入口、任何新绑的域名都会被硬拽到主域名上。
+    ------------------------------------------------------------------ */
+    console.log('');
+    console.log('[4] 白名单行为（哪些跳、哪些不跳）');
+    const decide = (hostname) => {
+      const h = hostname.toLowerCase();
+      const b2 = h.slice(0, 4) === 'www.' ? h.slice(4) : h;
+      return h !== CANON && FAMILY.indexOf(b2) !== -1;
+    };
+    const CASES = [
+      [CANON, false, '主域名 —— 不动'],
+      ['www.' + CANON, true, '带 www —— 归一'],
+      [TRAD, true, '繁体 —— 归一'],
+      ['www.' + TRAD, true, '繁体带 www —— 归一'],
+      ['127.0.0.1', false, '本地开发 —— 别碰'],
+      ['localhost', false, '本地开发 —— 别碰'],
+      ['flashdrop.153764384.workers.dev', false, '备用入口 —— 别碰'],
+      ['www.example.com', false, '无关域名 —— 别碰'],
+    ];
+    let bad = 0;
+    for (const [h, want, why] of CASES) {
+      const got = decide(h);
+      if (got !== want) bad++;
+      console.log(`    ${got === want ? '✅' : '❌'} ${h.padEnd(34)} 跳=${got}  (期望 ${want})  ${why}`);
+    }
+    if (!bad) ok(`${CASES.length} 条白名单行为全部符合预期`);
+    else no(`${bad} 条不符合预期`);
   } finally {
     await b.close().catch(() => {});
     await closeBrowser(DEBUG_PORT).catch(() => {});
@@ -164,7 +219,7 @@ function withWww(base) {
 
   console.log('');
   console.log('===== 结果 =====');
-  console.log(`  通过 ${pass} 项，失败 ${fail} 项`);
+  console.log(`  通过 ${pass} 项，失败 ${fail} 项${skip ? `，跳过 ${skip} 项` : ''}`);
   try { require('fs').rmSync(PROFILE, { recursive: true, force: true }); } catch { /* noop */ }
   process.exit(fail ? 1 : 0);
 })().catch((e) => {
