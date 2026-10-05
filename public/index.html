@@ -2,6 +2,12 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<!--
+  www 归一到主域名 —— 必须是同源外部文件，不能内联。
+  原因见 public/www-redirect.js 顶部注释：线上 CSP 是 `script-src 'self'`，
+  内联脚本会被静默拦掉。同步加载（不加 defer/async），保证在首次绘制前跳走。
+-->
+<script src="/www-redirect.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#ffffff">
 <title>FlashDrop · 跨设备互传</title>

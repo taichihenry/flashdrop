@@ -56,6 +56,37 @@ function ensureVendorAssets() {
   console.warn('[warn] 没找到 qrcode-generator，二维码功能会降级为纯文本链接');
 }
 
+/**
+ * 安全响应头 —— 与线上（Cloudflare 侧）保持一致。
+ *
+ * 为什么本地也要加：线上一直带着这套头，本地没有，于是出现「本地测通过、
+ * 一上线上就坏」的坑（真踩过：www 归一那段内联 <script> 被 CSP
+ * `script-src 'self'` 静默拦掉，DOM 里在、控制台不报错、就是不执行）。
+ * 两边环境不一致，本地测试的结论就不可信。
+ *
+ * 注意不要加 Strict-Transport-Security：本地是 http，加了会把自己顶到 https 打不开。
+ */
+const SECURITY_HEADERS = Object.freeze({
+  'Content-Security-Policy': [
+    "default-src 'self'",
+    "script-src 'self'",              // 不允许内联脚本；同源外部 .js 才行
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self'",
+    "connect-src 'self' ws: wss:",
+    "media-src 'self' blob:",
+    "worker-src 'self' blob:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+  ].join('; '),
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
+  'Referrer-Policy': 'strict-origin-when-cross-origin',
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+});
+
 function serveStatic(req, res) {
   let urlPath;
   try {
@@ -81,6 +112,7 @@ function serveStatic(req, res) {
     res.writeHead(200, {
       'Content-Type': MIME[path.extname(filePath).toLowerCase()] || 'application/octet-stream',
       'Cache-Control': 'no-cache',
+      ...SECURITY_HEADERS,
     }).end(data);
   });
 }
