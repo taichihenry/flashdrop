@@ -15,10 +15,7 @@ compatibility_date = "2026-09-01"
 # custom_domain = true 表示由 Cloudflare 自动签发证书 + 建 DNS 记录，
 # 不需要手动去 DNS 面板加 CNAME。
 routes = [
-  { pattern = "6.xn--fiqs8s", custom_domain = true },
-  # 临时预览入口：借已激活的 midoai.com 区域做实测（6.中国 切 NS 生效前可用）。
-  # 不需要时删掉这一行重新 deploy 即可。
-  { pattern = "flashdrop.midoai.com", custom_domain = true }
+  { pattern = "6.xn--fiqs8s", custom_domain = true }
 ]
 
 # 保留 *.workers.dev 备用入口（海外可直连；大陆被 DNS 污染，走不通，

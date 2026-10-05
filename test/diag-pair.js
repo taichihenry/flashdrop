@@ -22,7 +22,7 @@ const fs = require('fs');
 const { launch, waitFor, sleep, tempProfile, findChrome } = require('./lib');
 
 const CHROME = findChrome();
-const BASE = process.argv[2] || process.env.BASE || 'https://flashdrop.midoai.com';
+const BASE = process.argv[2] || process.env.BASE || 'https://6.xn--fiqs8s';
 const HEADLESS = process.env.HEADFUL !== '1';
 
 const procs = [];

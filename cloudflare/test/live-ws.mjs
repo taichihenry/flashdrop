@@ -1,7 +1,7 @@
 // 线上双端信令实测：建房 → 加入 → 定向转发
 // 用法：node test/live-ws.mjs [host]
-// 默认打 http/https://flashdrop.midoai.com
-const HOST = process.argv[2] || 'flashdrop.midoai.com';
+// 默认打正式域名 6.中国（punycode：6.xn--fiqs8s）
+const HOST = process.argv[2] || '6.xn--fiqs8s';
 const URL_WS = `wss://${HOST}/ws`;
 
 const log = (...a) => console.log(...a);
