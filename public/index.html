@@ -51,16 +51,27 @@
     <div class="connect-body">
       <div id="qr-holder" class="qr-holder"></div>
       <div class="connect-info">
-        <p class="lead" id="connect-lead">扫码打开本页，两台设备就能直接互传文字和文件 —— <b>手机、电脑、平板都行，不用装任何 App</b>。</p>
+        <p class="lead" id="connect-lead">用另一台设备扫左侧二维码，两台设备会自动互相「看见」。<b>手机、电脑、平板都行，不用装任何 App</b>。</p>
+
+        <!-- 房间码：二维码里带的也是它，扫码不方便时可以直接念给对方 -->
+        <div class="room-code-row">
+          <span class="room-code-label">房间码</span>
+          <code id="room-code" class="room-code">------</code>
+          <button id="btn-copy-room" class="btn btn-ghost btn-sm">复制</button>
+        </div>
+
         <div class="url-row">
           <code id="lan-url">检测中…</code>
-          <button id="btn-copy-url" class="btn btn-ghost btn-sm">复制</button>
+          <button id="btn-copy-url" class="btn btn-ghost btn-sm">复制链接</button>
         </div>
+
         <ol class="steps" id="connect-steps">
-          <li><b>两台设备在同一个 Wi-Fi 下</b>：用另一台的相机扫左侧二维码，两边会自动互相「看见」</li>
-          <li><b>不在同一个网络</b>（比如电脑连 Wi-Fi、手机用流量）：<b>光扫码是看不到对方的</b>，要点顶部<b>配对</b> —— 一端出 6 位码，另一端输码（或扫配对二维码）即可跨网络互传</li>
+          <li><b>扫左边的二维码</b>：两边自动配对，不用输任何东西。码里带着房间号，<b>跨网络也能连</b> —— 不要求两台设备在同一个 Wi-Fi</li>
+          <li><b>不方便扫码</b>：让对方打开本页，把上面的<b>房间码</b>念给他，在顶部「房间」里输入；也可以用「配对」的 6 位码，做固定的一对一连接</li>
           <li>点一下对方的名字，就能发文字和文件</li>
         </ol>
+
+        <p id="net-hint" class="notice notice-quiet"></p>
         <div id="secure-hint" class="notice" hidden></div>
       </div>
     </div>
@@ -70,13 +81,31 @@
   <section id="peers-panel" class="card">
     <div class="card-head">
       <h2>附近设备</h2>
-      <span id="room-badge" class="badge" hidden></span>
+      <!-- 临时房间标签本身就是退出入口：点一下即退。
+           标题栏平时是空的，所以它不会占位、也不给界面添元素 —— 只在真的
+           进了房间时才出现，而且出现的地方就是「你现在在哪」这个信息该在的位置。 -->
+      <button id="room-badge" class="badge badge-exit" type="button" hidden></button>
     </div>
     <div id="peer-list" class="peer-grid"></div>
     <div id="peers-empty" class="empty">
-      还没有其他设备。<br>把上面的二维码给 <b>同一个 Wi-Fi 下</b>的设备扫一下，或让它打开同一个地址。
+      还没有其他设备。<br>把上面的二维码给另一台设备扫一下，或把房间码念给对方。
+      <!-- 仅在「附近设备」房间满时显示（多为 CGNAT：大量用户共用一个出口 IP）。
+           这是保护而非故障，所以说明要写清楚，别让人以为是页面坏了。 -->
+      <div id="lan-full-hint" class="notice notice-quiet" hidden>
+        当前网络下共享同一出口地址的设备太多，<b>「附近设备」已自动关闭</b>（防止陌生人串房）。
+        用上面的<b>房间码</b>，或顶部「配对」的 6 位码，照样能互传。
+      </div>
+      <!-- 本站整体关闭了设备自动发现时显示（服务端 WAN_ROOM_MODE=off）。
+           要点：Cloudflare 看到的是**公网出口 IP**，所以这个状态下连同一个
+           Wi-Fi 下的两台设备也不会互相出现 —— 不写清楚的话，用户会一直等
+           一个永远不会出现的设备，看起来就是页面坏了。 -->
+      <div id="lan-off-hint" class="notice notice-quiet" hidden>
+        本站已<b>关闭设备自动发现</b>（防止陌生人在公网上互相串房）。
+        用上面的<b>二维码</b>或<b>房间码</b>，或顶部「配对」的 6 位码，都能互传。
+      </div>
       <div class="empty-wan">
-        两台设备<b>不在同一个网络</b>？<br>光扫码看不到对方 —— 在两端各点一次顶部「配对」，用 6 位配对码连接。
+        应该有设备却看不见？<br>先确认对方打开的就是<b>同一个链接</b>（地址栏末尾应有 <code>#room=…</code>）；
+        也可以用顶部「配对」的 6 位码。
         <button id="btn-empty-pair" class="btn btn-primary btn-sm" type="button">开始配对</button>
       </div>
     </div>

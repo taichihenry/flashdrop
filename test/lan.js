@@ -106,12 +106,24 @@ async function main() {
   console.log('');
 
   console.log('[3] 关键断言：两端必须落进同一个局域网房间');
-  const roomPc = await pc.cdp.eval(`window.__fd.signaling.roomId || ''`);
-  const roomPh = await phone.cdp.eval(`window.__fd.signaling.roomId || ''`);
-  console.log(`    电脑：${roomPc}`);
-  console.log(`    手机：${roomPh}`);
-  check('两端房间一致（loopback 已归入本机局域网）', !!roomPc && roomPc === roomPh,
-    roomPc === roomPh ? '' : '不同房 → 同 WiFi 下会互相看不见');
+  // ⚠ 这里必须读 lanRoomId，不能读 roomId。
+  // roomId 是「当前挑出来发信令的那一间房」，而房间有优先级：
+  // 扫码会话房间(session) > 公共房间(public) > 自动发现房间(lan)。
+  // 两个页面各自生成扫码房间码、天然不同，所以 roomId 本来就不该相等。
+  // 这条断言真正要守的是「按 IP 分房」那条规则 —— loopback 必须归入本机局域网，
+  // 也就是 lanRoomId，它只被 roomType==='lan' 的消息更新，语义没有被改动波及。
+  const lanPc = await pc.cdp.eval(`window.__fd.signaling.lanRoomId || ''`);
+  const lanPh = await phone.cdp.eval(`window.__fd.signaling.lanRoomId || ''`);
+  console.log(`    电脑：${lanPc}`);
+  console.log(`    手机：${lanPh}`);
+  check('两端局域网房间一致（loopback 已归入本机局域网）', !!lanPc && lanPc === lanPh,
+    lanPc === lanPh ? '' : '不同房 → 同 WiFi 下会互相看不见');
+
+  // 顺手钉住新行为：扫码房间是各页面独立生成的，两端不该撞在一起 ——
+  // 真撞上了说明随机码或 hash 解析出了问题。
+  const scanPc = await pc.cdp.eval(`window.__fd.state.sessionRoom || ''`);
+  const scanPh = await phone.cdp.eval(`window.__fd.state.sessionRoom || ''`);
+  check('各自的扫码房间码不冲突', !!scanPc && !!scanPh && scanPc !== scanPh, `${scanPc} / ${scanPh}`);
   console.log('');
 
   console.log('[4] 互相发现');

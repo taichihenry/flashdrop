@@ -118,7 +118,7 @@ env.SIGNAL (SignalRoom)                      Durable Object
 env.BUDGET (TurnBudget)                      Durable Object
 env.ASSETS                                   Assets
 env.WS_RELAY ("on")                          Environment Variable
-env.WAN_ROOM_MODE ("ip")                     Environment Variable
+env.WAN_ROOM_MODE ("off")                    Environment Variable
 env.TURN_MONTHLY_BUDGET_GB ("900")           Environment Variable
 ```
 
@@ -397,12 +397,14 @@ Cloudflare 后台 → **Billing** → **Billable Usage** → **Create budget ale
 
 ### 两台设备互相看不见
 
-1. 先确认它们是不是在同一个网络 —— 如果不在，**必须用配对码**，这是设计如此
-2. 如果 `wrangler.toml` 里把 `WAN_ROOM_MODE` 改成了 `"off"`，那公网下就
-   完全不会自动发现，只能配对
-3. 同一 Wi-Fi 下还是看不见：多半是**两个人都走了 CGNAT**，
-   各自的公网 IP 不同（虽然连的是同一个路由器 —— 这在双频路由器
-   "2.4G 走宽带、5G 走流量"之类的情况下真的会发生）
+1. **先看「附近设备」区域有没有一段说明**：「本站已关闭设备自动发现…」——
+   有的话说明本站的自动发现是关的（`WAN_ROOM_MODE = "off"`，防 CGNAT 串房），
+   **属于正常设计，不是故障**。请改用二维码 / 房间码 / 配对码。
+2. 如果是「应该有设备却看不见」，先确认对方打开的是不是**同一条链接**
+   —— 地址栏末尾应当有 `#room=xxxxxx`
+3. 还不行就走顶栏「**配对**」的 6 位码：这条路与 IP 无关，也最稳
+4. 想恢复"同一个路由器下自动发现"体验：把 `wrangler.toml` 的 `WAN_ROOM_MODE`
+   改回 `"ip"` 重新部署（**但要先接受 CGNAT 串房风险**，见 §1.1 与检查报告第九节）
 
 ### 卡在「正在连接」，最后退回中继
 
@@ -456,7 +458,7 @@ npm install -D wrangler --registry=https://registry.npmmirror.com
 | 看请求量 / 错误率 | 后台 → Workers & Pages → flashdrop → Metrics |
 | 看 TURN 用量 | 后台 → Billing → Billable Usage |
 | 看构建分钟余量 | 后台 → Workers & Pages → flashdrop → Builds |
-| 改公开房间类型 | `wrangler.toml` 的 `WAN_ROOM_MODE` → 重新部署 |
+| 开 / 关自动发现 | `wrangler.toml` 的 `WAN_ROOM_MODE`（当前 `"off"`）→ 重新部署 |
 | 关掉 WS 中继兜底 | `wrangler.toml` 的 `WS_RELAY = "off"` |
 | 回滚 | 后台 → Worker → Deployments → 选旧版本 Rollback |
 

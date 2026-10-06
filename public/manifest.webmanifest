@@ -1,7 +1,7 @@
 {
   "name": "FlashDrop 跨设备互传",
   "short_name": "FlashDrop",
-  "description": "手机、电脑、平板之间互传文字和文件；同一网络自动发现，跨网络用 6 位码配对",
+  "description": "手机、电脑、平板之间互传文字和文件；扫个码就配对，不在同一个网络也能用",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#f5f6f8",

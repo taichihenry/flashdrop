@@ -17,10 +17,24 @@
     receiveOpen: false,
     lanUrl: '',
     httpsUrl: '',
+    phoneUrl: '',          // 二维码的基址（不含 hash），由 /api/info 决定
+    sessionRoom: '',       // 本页的「扫码会话房间」码
+    lanRoomFull: false,    // 「附近设备」房间已满（CGNAT 保护触发），需要换一套说法
+    autoDiscoverOff: false,// 本站关闭了自动发现（服务端 WAN_ROOM_MODE=off），换另一套说法
+    pendingRoomJoin: '',   // 刚刚点过「加入」的房间码：只有它回来才自动关弹窗
   };
 
   const LS_NAME = 'flashdrop.name';
   const LS_PAIRS = 'flashdrop.pairedRooms';
+
+  // 从地址栏 hash 里取房间码 / 配对码。两者可能同时存在，各取各的。
+  //
+  // 房间码卡死 6 位，与服务端的 SESSION_CODE_RE 逐字对应。这个码是本页自己
+  // 生成的，形态本来就固定 6 位；放宽成 4 位会让别人能靠穷举短码摸进房间
+  // （31^4 ≈ 92 万，跑一遍只要几分钟）。改这里必须同步改 server.js 与
+  // cloudflare/src/room.js，否则会出现「前端认了这个码、服务端拒收」。
+  const ROOM_HASH_RE = /[#&]room=([a-z0-9]{6})/i;
+  const PAIR_HASH_RE = /[#&]pair=(\d{6})/;
 
   /* ============================== 小工具 ============================== */
 
@@ -150,6 +164,71 @@
     }
   }
 
+  /* ============================== 扫码会话房间 ============================== */
+
+  function isPrivateHost(host) {
+    return !host || host === 'localhost' || host === '::1'
+      || /^127\./.test(host)
+      || /^10\./.test(host)
+      || /^192\.168\./.test(host)
+      || /^172\.(1[6-9]|2\d|3[01])\./.test(host)
+      || host.endsWith('.local') || host.endsWith('.lan');
+  }
+
+  /**
+   * 刷新首页那个大二维码。
+   *
+   * 二维码里放的是**一条带房间号的完整网址**，这是整个改造的核心：
+   * 扫码方打开它就直接落进同一间房，不用输码、不用等设备发现，
+   * 而且与「两台设备是不是在同一个网络」完全无关 —— 房间是个逻辑编号，
+   * 跟双方的出口 IP 没有任何关系。这正是它能跨网络的原因。
+   */
+  function updateQr() {
+    let base = (state.phoneUrl || location.origin).split('#')[0];
+    // 补上根路径的斜杠。`http://host:8686#room=x` 浏览器照样打得开（会自己补 /），
+    // 但复制出去不像个正常网址，二维码也多编一个无意义的字符。
+    try {
+      const u = new URL(base);
+      base = u.origin + u.pathname + u.search;
+    } catch { /* 不是合法 URL 就原样用 */ }
+
+    const link = state.sessionRoom ? `${base}#room=${state.sessionRoom}` : base;
+    $('lan-url').textContent = link;
+    renderQr($('qr-holder'), link);
+  }
+
+  function showRoomCode(code) {
+    state.sessionRoom = code || '';
+    const box = $('room-code');
+    if (box) box.textContent = state.sessionRoom || '------';
+    const copyBtn = $('btn-copy-room');
+    if (copyBtn) copyBtn.disabled = !state.sessionRoom;
+    updateQr();
+  }
+
+  /**
+   * 定下本页的「扫码会话房间」。
+   *
+   * 地址栏里带 #room=xxx 就用它（对方扫了码进来的情况）；没有就现生成一个
+   * （先打开页面的人当房主）。定完立刻写回地址栏 —— 这样电脑刷新、手机刷新
+   * 都还落在同一间房，不会「刷一下就断了」。
+   *
+   * 注意房间码是**前端自己生成**的，服务端只是被动建房间。少了「先申请房间号」
+   * 这一趟往返，首屏就能把二维码画出来。
+   */
+  function setupSessionRoom() {
+    const m = ROOM_HASH_RE.exec(location.hash);
+    const code = m ? m[1].toLowerCase() : FD.randomRoomCode();
+
+    signaling.joinSessionRoom(code, true);
+
+    try {
+      history.replaceState(null, '', location.pathname + location.search + '#room=' + code);
+    } catch { /* 某些环境（如 file://）会抛，忽略即可，不影响功能 */ }
+
+    showRoomCode(code);
+  }
+
   /* ============================== 顶栏状态 ============================== */
 
   function setConn(stateName, text) {
@@ -187,6 +266,17 @@
     for (const p of [...state.targets]) if (!peers.includes(p)) state.targets.delete(p);
 
     $('peers-empty').hidden = peers.length > 0;
+
+    // 「附近设备」因房间满而关闭时，把原因摆在空状态里。
+    // 不这么做的话，用户看到的就是「同一个 Wi-Fi 却看不到设备」—— 像个 bug。
+    const lanHint = $('lan-full-hint');
+    if (lanHint) lanHint.hidden = !state.lanRoomFull;
+
+    // 本站整体关闭了自动发现（WAN_ROOM_MODE=off，为防 CGNAT 串房）：
+    // 同样是「看不到设备」，但原因不同、说法也得不同 —— 而且这个状态下
+    // 连同一个 Wi-Fi 的设备也不会自动出现，必须把「改用什么」讲清楚。
+    const lanOffHint = $('lan-off-hint');
+    if (lanOffHint) lanOffHint.hidden = !(state.autoDiscoverOff && !state.lanRoomFull);
     // 扫码面板「常驻」，不再因为发现设备就整块隐藏。
     //
     // 之前这里是 `connect-panel.hidden = peers.length > 0`，副作用是：第二台设备
@@ -222,13 +312,21 @@
     }
 
     $('relay-note').hidden = !anyRelay;
+    // 这里只标「临时房间」（房间弹窗里拉的那个）。扫码会话房间码常驻在引导区，
+    // 两个都叫「房间」会让用户分不清自己现在到底在哪一间。
+    //
+    // 标签本身就是退出按钮（.badge-exit）：它是主界面上唯一的出口。
+    // 之前只能从弹窗里退，而弹窗一关就再也找不到入口 ——「我进了房间，怎么退？」
     const badge = $('room-badge');
     if (signaling && signaling.roomCode) {
       badge.hidden = false;
-      badge.textContent = '房间 ' + signaling.roomCode;
+      badge.textContent = '临时房间 ' + signaling.roomCode;
+      badge.appendChild(el('span', 'badge-x', '✕'));
+      badge.title = '点击退出房间 ' + signaling.roomCode;
       $('btn-room-leave').hidden = false;
     } else {
       badge.hidden = true;
+      badge.title = '';
       $('btn-room-leave').hidden = true;
     }
     refreshConnStatus();
@@ -427,6 +525,26 @@
     if (signaling) signaling.pairCancel();
   }
 
+  /**
+   * 退出当前的「临时房间」。
+   *
+   * 两个入口共用它：主界面右上角的房间标签（.badge-exit）和弹窗里的「退出房间」。
+   * 两处必须走同一条路径 —— 否则「从哪儿退」会决定「退完之后界面长什么样」，
+   * 迟早分叉出「弹窗关了但标签还在」这类对不上的状态。
+   *
+   * 注意只退临时房间（signaling.roomCode）。扫码会话房间是另一回事：它的码写在
+   * 地址栏里、二维码也指向它，退出它等于把页面自己踢出房间，没这个语义。
+   */
+  function leaveCurrentRoom() {
+    const code = signaling && signaling.roomCode;
+    if (code) {
+      signaling.leaveRoom(code);
+      toast('已退出房间 ' + code);
+    }
+    closeModal();
+    renderPeers();
+  }
+
   function openPair() {
     $('pair-initiate-view').hidden = false;
     $('pair-join-view').hidden = false;
@@ -471,6 +589,16 @@
           if (saved !== p.displayName) signaling.rename(saved);
         } else {
           $('my-name').textContent = p.displayName;
+        }
+
+        // 服务端告诉我们「本站有没有关闭自动发现」。
+        // WAN_ROOM_MODE=off 时它**不会**回任何房间消息（连「房间已满」都不回，
+        // 因为压根没尝试入房），界面若不说明，用户看到的只是一个空列表 —— 像坏了。
+        // 每次都按当前连接刷新：重连后服务端配置可能已变。
+        const off = !!(p.config && p.config.autoDiscover === false);
+        if (state.autoDiscoverOff !== off) {
+          state.autoDiscoverOff = off;
+          renderPeers();
         }
         break;
       }
@@ -629,16 +757,57 @@
         break;
       case 'room-created':
         toast('房间已创建：' + p.roomId);
+        // 留着码，以防下面这次 closeModal 被接收确认框挡住（那时弹窗还开着，
+        // 用户至少能看见刚建的房间码）。
         $('room-input').value = p.roomId;
+        // 创建即入房，弹窗的使命已经完成 —— 直接收起，露出主界面的房间标签。
+        closeModal();
         renderPeers();
         break;
       case 'room-joined':
-        toast('已加入房间 ' + p.roomId);
+        if (p.scope === 'session') {
+          // 会话房间是页面自带的，二维码已经指向它 —— 不该再弹提示打扰用户
+          showRoomCode(p.roomId);
+        } else {
+          toast('已加入房间 ' + p.roomId);
+          // 只关「用户刚在这个弹窗里点了加入」的那一次，不能无条件关：
+          // 重连时 net.js 会把 joinRoom 重放一遍，服务端再回一条 room-joined ——
+          // 那一刻用户很可能正开着配对弹窗，顺手关掉就把配对打断了。
+          if (state.pendingRoomJoin === p.roomId) {
+            state.pendingRoomJoin = '';
+            closeModal();
+          }
+          renderPeers();
+        }
+        break;
+      case 'room-error': {
+        state.pendingRoomJoin = '';   // 失败了就别再惦记着关弹窗
+        const text = p.reason || '加入失败';
+        // 弹窗开着就写进弹窗，否则走 toast。
+        // 为什么不能只写弹窗：扫码房间是页面**自动**加入的，那一刻房间弹窗
+        // 根本没打开 —— 只往弹窗里写，用户看到的就是「扫了码什么都没发生」。
+        // 房间满员正是最容易撞上的那一种。
+        if (!$('overlay').hidden && !$('modal-room').hidden) {
+          $('room-error').textContent = text;
+          $('room-error').hidden = false;
+        } else {
+          toast(text);
+        }
+        break;
+      }
+
+      // 自动发现房间满了（多半是 CGNAT：成千上万人共用一个出口 IP）。
+      // 这不是故障 —— 是我们主动关掉了「附近设备」以防陌生人串房。
+      // 所以不弹错，换成设备列表里的一句常驻说明。
+      case 'lan-room-full':
+        state.lanRoomFull = true;
         renderPeers();
         break;
-      case 'room-error':
-        $('room-error').textContent = p.reason || '加入失败';
-        $('room-error').hidden = false;
+
+      // 服务端主动断开我们（目前只有消息刷太快被限流）。
+      // 给一句人话，否则用户只会看到「连接中断」然后莫名其妙地重连。
+      case 'signaling-error':
+        toast(p.message || '连接被服务器断开，正在重连');
         break;
 
       /* ---- 接收请求 ---- */
@@ -750,7 +919,16 @@
       $('activity-panel').hidden = true;
     });
 
-    $('btn-copy-url').addEventListener('click', () => copyText(state.httpsUrl || state.lanUrl));
+    // 复制的是**带房间号的完整链接**，直接发给对方也能进同一间房
+    $('btn-copy-url').addEventListener('click', () => copyText($('lan-url').textContent));
+
+    const copyRoomBtn = $('btn-copy-room');
+    if (copyRoomBtn) {
+      copyRoomBtn.addEventListener('click', () => {
+        if (!state.sessionRoom) { toast('房间还没准备好，稍等一下'); return; }
+        copyText(state.sessionRoom);
+      });
+    }
 
     // 配对
     $('btn-pair').addEventListener('click', openPair);
@@ -779,13 +957,13 @@
     $('btn-room-join').addEventListener('click', () => {
       const code = $('room-input').value.trim().toLowerCase();
       if (!code) return;
+      // 记下「是用户主动要进这间房」，好在它回来时自动收起弹窗（见 room-joined）
+      state.pendingRoomJoin = code;
       signaling.joinRoom(code, false);
     });
-    $('btn-room-leave').addEventListener('click', () => {
-      if (signaling.roomCode) signaling.leaveRoom(signaling.roomCode);
-      closeModal();
-      renderPeers();
-    });
+    $('btn-room-leave').addEventListener('click', leaveCurrentRoom);
+    // 主界面上的房间标签（HTML 里的固定节点，只换内容不换节点，所以绑一次就够）
+    $('room-badge').addEventListener('click', leaveCurrentRoom);
 
     $('overlay').addEventListener('click', (e) => {
       if (e.target === $('overlay')) closeModal();
@@ -814,16 +992,14 @@
     state.httpsUrl = urls.find((u) => u.startsWith('https://')) || '';
     state.lanUrl = urls.find((u) => u.startsWith('http://')) || '';
 
-    // 手机应该访问的地址：优先 HTTPS
-    let phoneUrl = state.httpsUrl || state.lanUrl;
-
-    // 如果当前就在局域网地址上打开（多半是电脑自己），把二维码指向 https 那个
-    if (location.protocol === 'https:' && state.httpsUrl) phoneUrl = state.httpsUrl;
-    else if (location.protocol === 'http:' && state.httpsUrl) phoneUrl = state.httpsUrl;
-
+    // 二维码该指向哪：优先服务端显式给出的公网地址（本地自建版接了反代/隧道时配），
+    // 其次局域网 HTTPS（手机必须安全上下文才允许 WebRTC），最后退回当前站点。
+    // 这里只定「基址」——房间号要等 setupSessionRoom() 跑完才拼得上去。
+    let phoneUrl = String(state.serverInfo.publicUrl || '').trim();
+    if (!phoneUrl) phoneUrl = state.httpsUrl || state.lanUrl;
     if (!phoneUrl) phoneUrl = location.origin;
-    $('lan-url').textContent = phoneUrl;
-    renderQr($('qr-holder'), phoneUrl);
+    state.phoneUrl = phoneUrl.split('#')[0];
+    updateQr();
 
     // 安全上下文检查 —— 这决定了能不能直传
     const hint = $('secure-hint');
@@ -854,14 +1030,34 @@
         );
       }
     }
+
+    // 二维码指向的地址能不能跨网络，只取决于它是不是公网可达 —— 必须如实说。
+    // 不写清楚的话，用户会默认「扫了码就该跨网络能连」，然后在 4G 下白试半天，
+    // 还以为是程序坏了。（内网地址对不在同一张网里的设备根本打不开。）
+    const netHint = $('net-hint');
+    if (netHint) {
+      let host = '';
+      try { host = new URL(state.phoneUrl).hostname; } catch { /* 忽略非法 URL */ }
+      netHint.textContent = (state.serverInfo.mode === 'public' || !isPrivateHost(host))
+        ? '扫码地址是公网地址 —— 两台设备不在同一个网络（一台连 Wi-Fi、一台用流量）也能直接配对。'
+        : '扫码地址是内网地址，只有和这台电脑在同一个网络的设备能打开它。跨网络的话，'
+          + '把下面的房间码告诉对方，或点顶部「配对」。';
+    }
   }
 
   async function main() {
     bindUi();
     await loadServerInfo();
 
+    // 必须在 setupSessionRoom() 之前读 —— 那一步会把地址栏 hash 改写成
+    // `#room=xxx`，改完就再也读不到 `#pair=` 了。（踩过一次）
+    const pairM = PAIR_HASH_RE.exec(location.hash);
+
     signaling = new FD.Signaling({ emit: handleEvent });
     window.__fd = { signaling, state };   // 方便调试
+
+    // 先定下扫码会话房间，首页二维码才有内容可画
+    setupSessionRoom();
 
     signaling.joinLanRoom();
 
@@ -872,12 +1068,10 @@
     } catch { /* 忽略 */ }
 
     // 支持 #pair=123456 直接带码进配对
-    const m = /#pair=(\d{6})/.exec(location.hash);
-    if (m) {
+    if (pairM) {
       openModal('pair');
-      $('pair-input').value = m[1];
-      signaling.pairJoin(m[1]);
-      history.replaceState(null, '', location.pathname);
+      $('pair-input').value = pairM[1];
+      signaling.pairJoin(pairM[1]);
     }
 
     renderPeers();

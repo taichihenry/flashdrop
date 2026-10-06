@@ -244,14 +244,99 @@ function randomRoomCode(len = 5) {
   return s;
 }
 
+/**
+ * 房间码校验 —— **两种房间码必须分开卡**。
+ *
+ * 房间码就是进门的唯一凭证（没有任何账号体系），所以它的长度直接等于
+ * 「别人撞进你房间」的成本：
+ *
+ *   - 扫码会话房间：码由前端 crypto.getRandomValues 生成，形态固定 6 位。
+ *     6 位空间 = 31^6 ≈ 8.9 亿。若放行 4 位（31^4 ≈ 92 万），穷举一遍
+ *     只要几分钟 —— 等于门没锁。所以这里必须卡死 6 位。
+ *   - 公共房间：码由用户手输（要能照着屏幕念、照着敲），保持宽松的 4~12 位。
+ *
+ * ⚠ 改动这里时记得同步 cloudflare/src/room.js 和 public/app.js 的 ROOM_HASH_RE，
+ *   三处不一致会出现「前端生成了码、服务端却拒收」的诡异现象。
+ */
+const SESSION_CODE_RE = /^[a-z0-9]{6}$/;
+const PUBLIC_CODE_RE = /^[a-z0-9]{4,12}$/;
+
+/**
+ * 单个连接最多能同时待几间房，超出即拒。
+ *
+ * 房间是「加入即创建」的（扫码房间必须先建后进，否则第一个进房的人会被
+ * 判成「房间不存在」），若不封顶，一个连接可以用随机码连续 join 十万次 ——
+ * 每次都在 rooms 表里留一个 Map、在 peer.rooms 里留一条记录，是典型的
+ * 内存放大。
+ *
+ * 取值 24 是被 Cloudflare 那侧倒逼的：Durable Object 的
+ * serializeAttachment 上限 **16,384 字节**，而一个 secret: 房间 ID 就有
+ * 71 个字符，几百个就撑爆了。超出后 attachment 写入会**静默失败**
+ * （见 room.js 的 _patch），房间记录凭空消失、状态错乱。
+ * Node 版跟着取同一个值，两边行为保持一致。
+ *
+ * 正常用户远够不着：lan(1) + session(1) + 公共房间(几个) + 历史配对(每台设备 1 个)。
+ */
+const MAX_ROOMS_PER_PEER = 24;
+
+/**
+ * 房间人数上限 —— **必须与 cloudflare/src/room.js 的 ROOM_PEER_LIMITS 逐字一致**。
+ *
+ * 两边不一致的后果是「本地测好好的、线上一扫码就进不去」：本地版跑的是这份，
+ * 而真实部署跑的是 Cloudflare 那份，行为分叉了却很难发现。
+ *
+ * 取值理由（摘要，详细论证见 room.js 同一处注释）：
+ *   · session/secret 2 —— 产品语义就是一对一，2 是上限不是近似值。
+ *   · public 12 —— 临时拉几个人的余量。
+ *   · lan 64 —— 同一网络自动发现。**不能设小**：CGNAT 下成千上万人共享一个
+ *     出口 IP，设小会误伤；但也不能不限，否则一间房就能把广播扇出打到几百。
+ */
+const ROOM_PEER_LIMITS = {
+  session: 2,
+  secret: 2,
+  public: 12,
+  lan: 64,
+};
+const DEFAULT_ROOM_LIMIT = 64;
+
+/** 全局房间数上限（防房间表无限膨胀）。上限较大，正常用法碰不到。 */
+const MAX_ROOMS_TOTAL = 2000;
+
+/** 全局连接数上限。本地版跑在自家电脑上，这条主要是防意外（比如脚本刷连接）。 */
+const MAX_CONNECTIONS = 1000;
+
+/**
+ * 单连接消息限流（固定 1 秒窗口，条数 + 字节双阈值）。
+ *
+ * 云端版靠它守住免费额度（每条入站消息都会唤醒 Durable Object 并计一次请求），
+ * 本地版靠它防止一条连接把 Node 进程的 CPU 打满。阈值选定的依据是**不能误伤
+ * 兜底中继**：中继走的就是这条 WS，文件分片 64 KB、base64 膨胀后约 88 KB/条，
+ * 300 条/秒 ≈ 26 MB/s，真实网络达不到但足够不误伤。
+ */
+const MSG_MAX_PER_SEC = 300;
+const MSG_MAX_BYTES_PER_SEC = 24 * 1024 * 1024;
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /* ============================== 服务器主体 ============================== */
 
 const DEFAULT_ICE = [
+  { urls: 'stun:stun.cloudflare.com:3478' },
+  { urls: 'stun:stun.miwifi.com:3478' },
   { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
 ];
+/*
+ * ⚠ 这份列表必须与 public/net.js 的 DEFAULT_ICE_SERVERS、
+ *   cloudflare/src/room.js 的 BASE_ICE **逐字一致**（test/ice-config.js 会校验）。
+ *   三份漂移过一次，教训是：原来这里只有两个 google STUN，而
+ *   stun.l.google.com / stun1.l.google.com 在国内是**不通的** ——
+ *   等于国内用户的 P2P 完全没有 STUN，只能收集 host 候选，跨网络必然失败，
+ *   静默掉进 WebSocket 中继（慢 + 白烧 DO 额度），界面上还看不出异常。
+ *
+ * 选型理由：cloudflare 第一（国内可达 + anycast 就近 + 官方免费无限），
+ * miwifi 是国内兜底，google 放最后（国内被墙，放前面只会拖慢 ICE 收集）。
+ * 顺序不是随意的：ICE 会按顺序试，把可达的放前面才能尽快收敛。
+ */
 
 class SignalingServer {
   /**
@@ -268,7 +353,7 @@ class SignalingServer {
     this.conf = Object.assign(
       {
         trustProxy: false, ignoreReportedAddr: false, wsRelay: true,
-        lanUrls: [], httpPort: null, httpsPort: null, tls: false,
+        lanUrls: [], publicUrl: '', httpPort: null, httpsPort: null, tls: false,
       },
       conf
     );
@@ -280,6 +365,7 @@ class SignalingServer {
     this.rooms = new Map();       // roomId -> Map(peerId -> Peer)
     this.peers = new Map();       // peerId -> Peer
     this.pairKeys = new Map();    // 6 位配对码 -> { roomSecret, creatorId, expiresAt }
+    this.rate = new Map();        // Peer -> { t, n, bytes }，限流窗口
     this.wsServers = [];
   }
 
@@ -292,6 +378,13 @@ class SignalingServer {
   /* ------------------------ 连接生命周期 ------------------------ */
 
   _onConnection(socket, req) {
+    // 连接闸门在最前面：拒绝比接收便宜，被拒的连接不进 peers / rooms。
+    // 用 1013（稍后重试）而不是直接 terminate，客户端才能把话说清楚。
+    if (this.peers.size >= MAX_CONNECTIONS) {
+      try { socket.close(1013, '服务器繁忙'); } catch { /* 可能已断开 */ }
+      return;
+    }
+
     const rawIp = this._clientIp(req);
     const peer = {
       id: crypto.randomUUID(),
@@ -318,6 +411,10 @@ class SignalingServer {
       config: {
         iceServers: this.conf.iceServers || DEFAULT_ICE,
         wsRelay: this.conf.wsRelay,
+        // Node 版没有 TURN 凭证签发端点（TURN 是由 ICE_SERVERS 环境变量直接
+        // 注入的，见 README）。显式告诉前端「别去调 /turn-credentials」——
+        // 否则每次 P2P 第一轮失败都会白跑一次 404。
+        turnAvailable: false,
       },
     });
 
@@ -346,6 +443,7 @@ class SignalingServer {
     if (!this.peers.has(peer.id)) return;   // 幂等
     clearInterval(peer.keepAlive);
     this.peers.delete(peer.id);
+    this.rate.delete(peer);                 // 限流桶跟着连接回收，否则 Map 只增不减
 
     for (const roomId of [...peer.rooms]) this._leaveRoom(peer, roomId);
 
@@ -358,6 +456,13 @@ class SignalingServer {
   /* ------------------------ 消息分发 ------------------------ */
 
   _onMessage(peer, buf) {
+    // 限流放在解析之前 —— 解析本身就要花 CPU，垃圾消息不该走到那一步。
+    if (!this._allowMessage(peer, buf)) {
+      this._send(peer, { type: 'error', reason: 'rate-limited', message: '消息过于频繁，连接已断开' });
+      try { peer.socket.close(1008, 'rate limited'); } catch { /* 可能已断开 */ }
+      return;
+    }
+
     let msg;
     try {
       msg = JSON.parse(buf.toString());
@@ -379,19 +484,38 @@ class SignalingServer {
         // 放在严格信任反代头的部署里，等于把分房依据交给客户端。
         const reported = this.conf.ignoreReportedAddr ? null : acceptedReportedAddr(msg.addr);
         const roomId = reported ? roomIdForIp(reported, this.localRoomId) : peer.ipRoom;
-        if (roomId) this._joinRoom(peer, roomId, 'lan');
+        if (roomId) {
+          const r = this._joinRoom(peer, roomId, 'lan');
+          // 自动发现的房间满了：CGNAT 下上千人共用一个出口 IP 的典型症状，
+          // 那些人本来就不该互相看见，所以不回「房间已满」那种像故障的错，
+          // 只回一条提示，让前端把话说清楚（改用配对码 / 房间码即可）。
+          if (!r.ok && r.reason === 'room-full') {
+            this._send(peer, { type: 'lan-room-full', limit: r.limit });
+          }
+        }
         break;
       }
 
       case 'create-room': {
         const roomId = 'pub:' + randomRoomCode(5);
-        this._joinRoom(peer, roomId, 'public');
+        const r = this._joinRoom(peer, roomId, 'public');
+        if (!r.ok) {
+          this._send(peer, {
+            type: 'room-error', code: r.reason,
+            reason: this._roomErrorText(r), count: r.count, limit: r.limit,
+          });
+          break;
+        }
         this._send(peer, { type: 'room-created', roomId: roomId.slice(4) });
         break;
       }
       case 'join-room': {
         const code = String(msg.code || '').trim().toLowerCase();
-        if (!/^[a-z0-9]{4,12}$/.test(code)) {
+        // scope='session' 指首页二维码那条「扫码会话房间」：生命周期跟页面一致、
+        // 用户不会手动退出；其余（默认）是房间弹窗里临时建的公共房间。
+        // 两者共用 pub: 房间空间，只是 roomType 不同 —— 前端按优先级挑一间发信令。
+        const scope = msg.scope === 'session' ? 'session' : 'public';
+        if (!(scope === 'session' ? SESSION_CODE_RE : PUBLIC_CODE_RE).test(code)) {
           this._send(peer, { type: 'room-error', reason: '格式不对' });
           break;
         }
@@ -400,8 +524,15 @@ class SignalingServer {
           this._send(peer, { type: 'room-error', reason: '房间不存在' });
           break;
         }
-        this._joinRoom(peer, roomId, 'public');
-        this._send(peer, { type: 'room-joined', roomId: code });
+        const rj = this._joinRoom(peer, roomId, scope);
+        if (!rj.ok) {
+          this._send(peer, {
+            type: 'room-error', code: rj.reason,
+            reason: this._roomErrorText(rj), count: rj.count, limit: rj.limit,
+          });
+          break;
+        }
+        this._send(peer, { type: 'room-joined', roomId: code, scope });
         break;
       }
       case 'leave-room':
@@ -416,8 +547,11 @@ class SignalingServer {
       case 'rejoin-room':
         // 重连后凭已保存的 roomSecret 回到旧配对
         if (typeof msg.roomSecret === 'string' && /^[0-9a-f]{32,128}$/i.test(msg.roomSecret)) {
-          this._joinRoom(peer, 'secret:' + msg.roomSecret, 'secret');
-          this._send(peer, { type: 'rejoin-ok', roomSecret: msg.roomSecret });
+          // 只有真进去了才回 ok：否则前端会把它记进「已配对设备」，
+          // 下次刷新又来一遍，越攒越多。
+          if (this._joinRoom(peer, 'secret:' + msg.roomSecret, 'secret').ok) {
+            this._send(peer, { type: 'rejoin-ok', roomSecret: msg.roomSecret });
+          }
         }
         break;
       case 'rename': {
@@ -443,6 +577,45 @@ class SignalingServer {
 
   /* ------------------------ 房间管理 ------------------------ */
 
+  /**
+   * 取房间，不存在就现建 —— 但受全局房间数闸门约束。
+   *
+   * 单独抽出来是因为「清僵尸」那步有可能把整间房回收掉（_leaveRoom 在房间空了
+   * 时会删条目），清理后必须重新取一次；沿用旧引用会拿到已脱钩的孤儿 Map，
+   * 往里放的成员在索引里查不到 —— 又变成「同房却互相看不见」。
+   *
+   * @returns {Map|null} null 表示房间总数已达上限
+   */
+  _ensureRoom(roomId) {
+    let room = this.rooms.get(roomId);
+    if (room) return room;
+    if (this.rooms.size >= MAX_ROOMS_TOTAL) return null;
+    room = new Map();
+    this.rooms.set(roomId, room);
+    return room;
+  }
+
+  /**
+   * 把 _joinRoom 的失败原因翻成给用户看的话。
+   * 三种失败的处理方式完全不同（换码 / 退出一些房间 / 稍后重试），
+   * 笼统回一句「进不去」会被当成网络故障。
+   */
+  _roomErrorText(r) {
+    if (r.reason === 'room-full') {
+      return `房间人数已达上限（${r.count}/${r.limit}），请让对方重新生成二维码或改用配对码`;
+    }
+    if (r.reason === 'server-full') return '服务器繁忙，请稍后重试';
+    return '你加入的房间太多了，请刷新页面后重试';
+  }
+
+  /**
+   * 让 peer 加入房间（房间不存在则现建）。
+   *
+   * @returns {{ok: true}|{ok: false, reason: string, count?: number, limit?: number}}
+   *   reason：'room-full'（人数满）/ 'server-full'（全局房间数或连接数满）
+   *   / 'room-limit'（单连接加入房间数超限）。调用方必须把这个结果报给客户端 ——
+   *   默默失败会让前端以为进房成功，界面上一直空着却不报错，极难排查。
+   */
   _joinRoom(peer, roomId, roomType) {
     // 已在房里：先退出，保证其他端不会收到"先 left 后 joined"的乱序。
     //
@@ -454,8 +627,27 @@ class SignalingServer {
       this._leaveRoom(peer, roomId);
     }
 
-    let room = this.rooms.get(roomId);
-    if (!room) { room = new Map(); this.rooms.set(roomId, room); }
+    // 封顶放在 leave 之后：否则「重复加入同一间房」会被自己误判成超限。
+    if (peer.rooms.size >= MAX_ROOMS_PER_PEER) return { ok: false, reason: 'room-limit' };
+
+    let room = this._ensureRoom(roomId);
+    if (!room) return { ok: false, reason: 'server-full' };
+
+    const limit = ROOM_PEER_LIMITS[roomType] || DEFAULT_ROOM_LIMIT;
+    if (room.size >= limit) {
+      // 先剔僵尸（socket 已关、但 close 事件还没处理完的连接）再下结论。
+      // 少了这一步，「刷新页面」就会把自己挡在门外：旧连接尚未回收，新连接的
+      // 加入请求已经到了，于是 2/2 的房间把真正的第二台设备拒掉。
+      for (const other of [...room.values()]) {
+        if (!other.socket || other.socket.readyState !== 1) this._leaveRoom(other, roomId);
+      }
+      // _leaveRoom 可能把空房间整条回收 —— 必须重新取，否则后面往里放的是孤儿 Map
+      room = this._ensureRoom(roomId);
+      if (!room) return { ok: false, reason: 'server-full' };
+      if (room.size >= limit) {
+        return { ok: false, reason: 'room-full', count: room.size, limit };
+      }
+    }
 
     const existing = [];
     for (const other of room.values()) existing.push(this._info(other));
@@ -468,6 +660,24 @@ class SignalingServer {
     peer.rooms.add(roomId);
 
     this._send(peer, { type: 'peers', peers: existing, roomType, roomId });
+    return { ok: true };
+  }
+
+  /**
+   * 每连接限流（固定 1 秒窗口，条数 + 字节双阈值）。
+   * @returns {boolean} false 表示超阈值，调用方应断开这条连接
+   */
+  _allowMessage(peer, buf) {
+    const bytes = buf && buf.length ? buf.length : 0;
+    const now = Date.now();
+    let b = this.rate.get(peer);
+    if (!b || now - b.t >= 1000) {
+      b = { t: now, n: 0, bytes: 0 };
+      this.rate.set(peer, b);
+    }
+    b.n++;
+    b.bytes += bytes;
+    return b.n <= MSG_MAX_PER_SEC && b.bytes <= MSG_MAX_BYTES_PER_SEC;
   }
 
   _leaveRoom(peer, roomId) {
@@ -496,7 +706,15 @@ class SignalingServer {
     peer.pairKey = pairKey;
     this.pairKeys.set(pairKey, { roomSecret, creatorId: peer.id, expiresAt: Date.now() + 10 * 60 * 1000 });
 
-    this._joinRoom(peer, 'secret:' + roomSecret, 'secret');
+    // 配对要额外占一间 secret: 房间，同样受上限保护；
+    // 失败时把刚发出去的配对码一并收回，别留个进不去的死码。
+    const rr = this._joinRoom(peer, 'secret:' + roomSecret, 'secret');
+    if (!rr.ok) {
+      this.pairKeys.delete(pairKey);
+      peer.pairKey = null;
+      this._send(peer, { type: 'pair-invalid', reason: this._roomErrorText(rr) });
+      return;
+    }
     this._send(peer, { type: 'pair-initiated', pairKey, roomSecret });
   }
 
@@ -514,7 +732,13 @@ class SignalingServer {
     this.pairKeys.delete(pairKey);
     if (creator) creator.pairKey = null;
 
-    this._joinRoom(peer, 'secret:' + entry.roomSecret, 'secret');
+    // 超限时绝不能照常通知对端「配对成功」：对端会切到一个你其实没进去的房间，
+    // 症状是「配对提示成功了，但设备列表一直空着」。
+    const rj = this._joinRoom(peer, 'secret:' + entry.roomSecret, 'secret');
+    if (!rj.ok) {
+      this._send(peer, { type: 'pair-invalid', reason: this._roomErrorText(rj) });
+      return;
+    }
 
     this._send(peer, { type: 'pair-joined', roomSecret: entry.roomSecret, peerId: entry.creatorId });
     if (creator) {
@@ -598,6 +822,10 @@ async function start(conf) {
       'Cache-Control': 'no-store',
     }).end(JSON.stringify({
       lanUrls: signaling.conf.lanUrls || [],
+      // 对外可达的地址（配了反代 / 内网穿透 / 隧道时由 PUBLIC_URL 指定）。
+      // 有它首页二维码才会指向公网地址，扫码房间才能真正跨网络用 ——
+      // 否则二维码只能指向内网 IP，只有同一张网里的设备打得开。
+      publicUrl: signaling.conf.publicUrl || '',
       httpPort: signaling.conf.httpPort,
       httpsPort: signaling.conf.httpsPort,
       tls: !!conf.tls,

@@ -54,6 +54,7 @@ export default {
         // 公网部署：没有"局域网地址"这回事，二维码直接指向当前站点
         mode: 'public',
         lanUrls: [],
+        publicUrl: '',   // 留空即代表"用当前站点"，前端会退回 location.origin
         wsPath: '/ws',
         wsRelay: env.WS_RELAY !== 'off',
         turn: !!(env.TURN_KEY_ID && env.TURN_KEY_SECRET),

@@ -79,6 +79,10 @@ const CONF = {
   ignoreReportedAddr: process.argv.includes('--ignore-reported-addr') || envFlag('IGNORE_REPORTED_ADDR'),
   wsRelay: !process.argv.includes('--no-relay'),
   iceServers: parseIceServers(),
+  // 对外可达的地址（反代 / 隧道 / 有公网 IP 时填）。
+  // 填了之后首页二维码就指向它，扫码房间即可跨网络使用；
+  // 不填则二维码指向局域网 IP，只有同一个网络里的设备能打开。
+  publicUrl: (process.env.PUBLIC_URL || argValue('--public-url', '')).trim(),
 };
 CONF.httpsPort = CONF.httpPort + 1;
 
@@ -187,12 +191,21 @@ async function main() {
     lanUrls.push(`http://${primary}:${CONF.httpPort}`);
   }
 
+  if (CONF.publicUrl) {
+    console.log(`  · 对外地址：${CONF.publicUrl}`);
+    console.log('    首页二维码会指向它 —— 扫码房间即可跨网络使用');
+  } else {
+    console.log('  · 未配置对外地址（PUBLIC_URL）。二维码指向局域网 IP，');
+    console.log('    只有和本机同一个网络的设备能打开；跨网络请用房间码 / 配对码');
+  }
+
   console.log('  [2/2] 启动服务');
   const { servers } = await start({
     httpPort: CONF.httpPort,
     httpsPort: tls ? CONF.httpsPort : 0,
     tls,
     lanUrls,
+    publicUrl: CONF.publicUrl,
     trustProxy: CONF.trustProxy,
     ignoreReportedAddr: CONF.ignoreReportedAddr,
     wsRelay: CONF.wsRelay,

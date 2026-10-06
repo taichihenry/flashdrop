@@ -24,11 +24,11 @@ const cdps = [];
 const instances = [];
 const dirs = [];
 
-async function boot(label, port) {
+async function boot(label, port, url) {
   const profileDir = tempProfile(`fd-shot-${label}-`);
   dirs.push(profileDir);
   const inst = await launch({
-    label, url: BASE, port, profileDir, chrome: findChrome(),
+    label, url: url || BASE, port, profileDir, chrome: findChrome(),
     headless: true, width: 1080, height: 900,
   });
   procs.push(inst.proc);
@@ -80,8 +80,12 @@ async function main() {
   await sleep(600);
   await shot(A, '扫码连接');
 
-  console.log('[2] 第二台设备加入');
-  const B = await boot('B', 9512);
+  console.log('[2] 第二台设备加入（等价于扫 A 页面上那个二维码）');
+  // 第二台必须打开**带房间号的那条链接** —— 那正是扫码的实际效果。
+  // 如果两个实例都打开首页，各自会生成房间码、落进不同房间，互相看不见。
+  const roomCode = await A.cdp.eval(`window.__fd.state.sessionRoom`);
+  if (!roomCode) throw new Error('A 端没有生成房间码，页面可能没初始化完');
+  const B = await boot('B', 9512, `${BASE}/#room=${roomCode}`);
   await waitFor('两端互相发现', () => A.cdp.eval(`window.__fd.signaling.peers.size >= 1`), 25000);
   await waitFor('P2P 通道就绪', () => A.cdp.eval(
     `(() => { const p = [...window.__fd.signaling.peers.values()][0]; return p && p.state === 'connected'; })()`
@@ -154,6 +158,19 @@ async function main() {
   ), 300000).catch(() => {});
   await sleep(800);
   await shot(A, '传输完成');
+
+  console.log('[6] 房间弹窗与主界面退出入口');
+  await A.cdp.eval(`document.getElementById('btn-room').click()`);
+  await sleep(500);
+  await shot(A, '房间弹窗');
+
+  // 点「创建」之后弹窗应当自己收起来，回到主界面并在右上角留下房间标签
+  await A.cdp.eval(`document.getElementById('btn-room-create').click()`);
+  await waitFor('弹窗自动关闭且标签出现', () => A.cdp.eval(
+    `document.getElementById('overlay').hidden && !document.getElementById('room-badge').hidden`
+  ), 10000).catch(() => {});
+  await sleep(500);
+  await shot(A, '房间标签');
 
   console.log('\n完成。\n');
   return 0;

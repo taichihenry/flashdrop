@@ -131,8 +131,14 @@ async function main() {
   console.log('');
 
   console.log('[3] 关键断言：两台手机必须落进同一个房间（同 Wi-Fi 自动发现）');
-  const roomA = await a.cdp.eval(`window.__fd.signaling.roomId || ''`);
-  const roomB = await b.cdp.eval(`window.__fd.signaling.roomId || ''`);
+  // ⚠ 这里必须读 lanRoomId，不能读 roomId（同 test/lan.js 的理由）。
+  // roomId 是「当前挑出来发信令的那一间房」，而房间有优先级：
+  // 配对(secret) > 扫码会话(session) > 公共(public) > 自动发现(lan)。
+  // 两个页面各自生成扫码房间码、天然不同，所以 roomId 本来就不该相等。
+  // 本断言真正要守的是「按 IP 分房」那条规则 —— 也就是 lanRoomId，
+  // 它只被 roomType==='lan' 的消息更新，语义没有被扫码房间改动波及。
+  const roomA = await a.cdp.eval(`window.__fd.signaling.lanRoomId || ''`);
+  const roomB = await b.cdp.eval(`window.__fd.signaling.lanRoomId || ''`);
   console.log(`    手机 A：${roomA}`);
   console.log(`    手机 B：${roomB}`);
   check('两台手机同房', !!roomA && roomA === roomB, roomA === roomB ? '' : '不同房 → 同 Wi-Fi 下会互相看不见');

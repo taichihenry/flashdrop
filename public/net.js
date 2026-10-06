@@ -26,6 +26,27 @@
   const BUFFER_HIGH = 4 * 1024 * 1024;       // 发送缓冲超过它就暂停
   const BUFFER_LOW = 512 * 1024;             // 降到它就继续
   const P2P_TIMEOUT_MS = 6000;               // P2P 握手超时 → 降级
+
+  // 免费 STUN 服务器 —— 默认就必须带上。
+  //
+  // 计费上完全安全：Cloudflare 官方明确写着 **STUN 免费且不限量**
+  // （stun.cloudflare.com），Realtime 的 1000 GB/月计费额度**只统计 TURN
+  // 中继的出口流量**，STUN 一个字节都不计入。所以这几条候选是纯赚。
+  //
+  // 为什么必须默认带：不带 STUN 时 RTCPeerConnection 只能收集到 host 候选
+  // （本机网卡地址），跨网络时对端根本路由不到 —— 也就是说**跨网络的 P2P
+  // 一次都不可能成功**，所有连接都会掉进 WebSocket 中继（慢，而且白烧
+  // Durable Object 额度）。带上 STUN 后，本来能打洞的那部分（经验值 80%+）
+  // 直接走 P2P，连 TURN 都不用碰，反而更省。
+  //
+  // 顺序有讲究：cloudflare 第一（国内可达 + anycast 就近），miwifi 是国内
+  // 兜底，google 放最后（国内被墙，放前面只会拖慢 ICE 收集）。
+  const DEFAULT_ICE_SERVERS = [
+    { urls: 'stun:stun.cloudflare.com:3478' },
+    { urls: 'stun:stun.miwifi.com:3478' },
+    { urls: 'stun:stun.l.google.com:19302' },
+  ];
+
   // 信令保活间隔。必须小于 Cloudflare 的 WebSocket 空闲超时（100 秒），
   // 留足余量取 75 秒。只在页面前台可见时才发（见 _startHeartbeat）。
   const HEARTBEAT_MS = 75 * 1000;
@@ -37,6 +58,43 @@
   const SIGNAL_BUFFER_TTL = 10000;           // 未知设备信令缓存 10 秒
   const MAX_TEXT_LEN = 256 * 1024;           // 单条文字上限
   const STREAM_TO_DISK_THRESHOLD = 64 * 1024 * 1024; // 超过 64 MB 才提示选目录
+
+  /**
+   * 房间码字母表 —— 必须与 server.js / cloudflare/src/room.js 逐字一致。
+   * 去掉 i l o 0 1 这些易混字符：房间码要能被人照着屏幕念给对方听。
+   */
+  const ROOM_CODE_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
+  const ROOM_CODE_LEN = 6;                   // 31^6 ≈ 8.9 亿，扫码场景碰撞可忽略
+
+  /**
+   * 一台设备可能同时待在多间房里，但信令**只能挑一间**发出去。
+   *
+   * 如果你把「挑哪间」写成"谁后到用谁"，两端加入房间的先后顺序只要有一点不同，
+   * 就会各自挑中不同的房间 —— A 把 SDP 发进 pub:abc，B 却在 lan:192.168.1 等它，
+   * 服务端的转发校验（发送者必须在目标房间内）直接把消息丢掉。
+   * 症状极具迷惑性：两边设备列表里都能看见对方，就是死活连不上。
+   *
+   * 改成按优先级取最高的那间，双方共同房间集合相同 ⇒ 选出的房间必然一致。
+   */
+  const ROOM_PRIORITY = { secret: 4, session: 3, public: 2, lan: 1 };
+
+  /**
+   * 生成房间码。
+   *
+   * 前端自己生成、而不是让服务端分配，是「一条网址一个房间」的前提：
+   * 客户端把码拼进二维码，扫码方打开同一个码就自动落进同一间房，
+   * 中间不需要任何一次"申请房间"的往返。
+   *
+   * crypto.getRandomValues 在非安全上下文下也可用（只有 crypto.subtle 不行），
+   * 所以 http 页面里一样能生成。
+   */
+  function randomRoomCode(len = ROOM_CODE_LEN) {
+    const buf = new Uint8Array(len);
+    crypto.getRandomValues(buf);
+    let s = '';
+    for (let i = 0; i < len; i++) s += ROOM_CODE_ALPHABET[buf[i] % ROOM_CODE_ALPHABET.length];
+    return s;
+  }
 
   /* ============================== 出口地址探测 ============================== */
 
@@ -115,10 +173,9 @@
 
       try {
         pc = new RTCPeerConnection({
-          iceServers: [
-            { urls: 'stun:stun.cloudflare.com:3478' },
-            { urls: 'stun:stun.l.google.com:19302' },
-          ],
+          // 出口地址探测同样吃 STUN，所以复用同一份列表，别再单独维护一份
+          // （历史上这里和 P2P 各写了一份，改一处忘一处，正是漂移的源头）。
+          iceServers: DEFAULT_ICE_SERVERS.slice(),
         });
       } catch {
         clearTimeout(timer);
@@ -967,6 +1024,9 @@
     }
 
     setRoom(roomType, roomId) {
+      const next = ROOM_PRIORITY[roomType] ?? -1;
+      const cur = ROOM_PRIORITY[this.roomType] ?? -1;
+      if (next < cur) return;      // 已有优先级更高的房间，保留它
       this.roomType = roomType;
       this.roomId = roomId;
     }
@@ -1378,10 +1438,17 @@
       this.emit = o.emit;
       this.peers = new Map();          // peerId -> Peer
       this.selfId = null;
-      this.config = { iceServers: [], wsRelay: true };
+      // 默认就带免费 STUN：P2P 第一轮（无 TURN）时靠它打洞。
+      // slice() 取副本：这份 config 被所有 Peer 共享，留个防御，免得将来有人
+      // 把 addIceServers 从 concat（返回新数组）改成 push（原地改）时把 TURN
+      // 凭证渗到别的 Peer 上去。
+      this.config = { iceServers: DEFAULT_ICE_SERVERS.slice(), wsRelay: true };
       this.roomType = null;
       this.roomId = null;
       this.displayName = null;
+      // 扫码会话房间码（首页二维码指向的那一间）。与 roomCode（房间弹窗里的
+      // 公共房间）分开记：前者跟页面同生命周期，后者用户可以随时建/随时退。
+      this.sessionRoomCode = null;
 
       this._signalBuffer = new Map();  // peerId -> {msgs:[], at}
       this._pendingRoom = null;
@@ -1449,6 +1516,15 @@
       }
       if (this._turnPromise) return this._turnPromise;
 
+      // 服务端在 self 里明说了自己没有 TURN 签发端点时，就别白跑这一趟。
+      // 这个请求不是免费的：P2P 第一轮失败就会调一次，每次要在 Cloudflare
+      // 上花掉 1 次 Worker 请求 + 1 次 DO 请求。没配 TURN 的环境下它 100%
+      // 只会拿到「未配置」，纯属白烧额度。
+      if (this.config && this.config.turnAvailable === false) {
+        this.turnExhausted = true;
+        return Promise.resolve([]);
+      }
+
       this._turnPromise = fetch('/turn-credentials', { cache: 'no-store' })
         .then((r) => (r.ok ? r.json() : null))
         .then((j) => {
@@ -1482,6 +1558,7 @@
         this.emit('signaling-open', {});
         // 重连后把之前的房间和配对统统重放一遍
         if (this._joinedRoom) this.joinLanRoom();
+        if (this.sessionRoomCode) this.joinSessionRoom(this.sessionRoomCode, true);
         if (this.roomCode) this.joinRoom(this.roomCode, true);
         for (const secret of this.roomSecrets || []) this.rejoinRoom(secret);
       };
@@ -1552,6 +1629,41 @@
         .catch(() => { this._probedAddr = null; send(); });
     }
 
+    /**
+     * 加入「扫码会话房间」—— 首页那个大二维码指向的房间。
+     *
+     * 这是跨网络配对的关键：房间是个**逻辑编号**，和双方各自的 IP 毫无关系。
+     * 只要两台设备用同一个房间码，不管一个在 Wi-Fi、一个在 4G，都会落进
+     * 服务端的同一个房间，也就立刻互相可见。自动发现那套按出口 IP 分房的
+     * 机制做不到这一点（跨网络必然分到两间房）。
+     *
+     * createIfInvalid：房间不存在也要建。因为「先打开页面的人」就是房间的
+     * 创建者，而它的加入请求一定早于扫码方，先建后进才顺。
+     */
+    joinSessionRoom(code, createIfInvalid) {
+      this.sessionRoomCode = code;
+      this.send({
+        type: 'join-room', code, createIfInvalid: !!createIfInvalid, scope: 'session',
+      });
+    }
+
+    /**
+     * 记录"当前选中的房间"，与 Peer.setRoom 用同一套优先级。
+     *
+     * Signaling.roomId 只被 _routeSignal 的兜底分支用到（给尚未建出 Peer 对象
+     * 的设备补发信令），如果它选中的房间和 Peer 不一致，补发的信令就会投错房间。
+     *
+     * @returns {boolean} 是否采纳
+     */
+    _updateRoom(roomType, roomId) {
+      const next = ROOM_PRIORITY[roomType] ?? -1;
+      const cur = ROOM_PRIORITY[this.roomType] ?? -1;
+      if (next < cur) return false;
+      this.roomType = roomType;
+      this.roomId = roomId;
+      return true;
+    }
+
     createRoom() { this.send({ type: 'create-room' }); }
 
     joinRoom(code, createIfInvalid) {
@@ -1599,16 +1711,14 @@
           break;
 
         case 'peers':
-          this.roomType = msg.roomType;
-          this.roomId = msg.roomId;
+          this._updateRoom(msg.roomType, msg.roomId);
           if (msg.roomType === 'lan') this.lanRoomId = msg.roomId;
           for (const info of msg.peers || []) this._createPeer(info, false, msg.roomType, msg.roomId);
           this.emit('peers', { peers: msg.peers || [], roomType: msg.roomType, roomId: msg.roomId });
           break;
 
         case 'peer-joined':
-          this.roomType = msg.roomType;
-          this.roomId = msg.roomId;
+          this._updateRoom(msg.roomType, msg.roomId);
           if (msg.roomType === 'lan') this.lanRoomId = msg.roomId;
           this._createPeer(msg.peer, true, msg.roomType, msg.roomId);
           this.emit('peer-joined', { peer: msg.peer, roomType: msg.roomType });
@@ -1650,10 +1760,31 @@
           this.emit('room-created', msg);
           break;
         case 'room-joined':
+          // 服务端把 scope 原样带回，用来区分「扫码会话房间」和「公共房间」——
+          // 两者共用同一套 pub: 房间，但记账和 UI 表现完全不同。
+          if (msg.scope === 'session') this.sessionRoomCode = msg.roomId;
+          else this.roomCode = msg.roomId;
           this.emit('room-joined', msg);
           break;
         case 'room-error':
+          // msg.code 是机器可读的原因（room-full / server-full / room-limit），
+          // msg.reason 是给人看的中文。两者都要往上传：界面按 code 决定说辞，
+          // 直接显示 reason 则在任何情况下都不至于空白。
           this.emit('room-error', msg);
+          break;
+
+        // 自动发现的房间满了。这多半是 CGNAT —— 成千上万人共用一个出口 IP，
+        // 那些人本来就不该互相看见。所以它不是「故障」，前端要换一套说法，
+        // 别让「同 Wi-Fi 看不到设备」变成用户眼里的 bug。
+        case 'lan-room-full':
+          this.emit('lan-room-full', msg);
+          break;
+
+        // 服务端主动报的异常（目前只有限流断线）。
+        // 故意不叫 'error' —— Peer 那条通道已经用了 'error' 表示传输失败，
+        // 两边混用会让「文件传失败了」和「被限流踢了」分不清。
+        case 'error':
+          this.emit('signaling-error', msg);
           break;
 
         default: break;
@@ -1742,6 +1873,7 @@
   window.FlashDrop = {
     Signaling,
     Peer,
+    randomRoomCode,
     formatBytes,
     formatSpeed,
     sanitizeName,
@@ -1749,6 +1881,6 @@
     memoryReceiveLimit,
     memoryReceiveRisk,
     probePublicAddr,
-    constants: { CHUNK_SIZE, PARTITION_SIZE, BUFFER_HIGH, P2P_TIMEOUT_MS },
+    constants: { CHUNK_SIZE, PARTITION_SIZE, BUFFER_HIGH, P2P_TIMEOUT_MS, DEFAULT_ICE_SERVERS },
   };
 })();

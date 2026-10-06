@@ -165,6 +165,23 @@ main {
   font-weight: 600;
 }
 
+/* 房间标签兼作退出按钮 —— 主界面上唯一的「退出房间」入口。
+   状态与操作合并成一处（标签本来就写着「你在哪个房间」），比旁边再挂一个
+   独立按钮少一个元素，也不用让用户去找。 */
+.badge-exit {
+  border: 0;
+  font-family: inherit;
+  line-height: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background .15s ease, color .15s ease;
+}
+.badge-exit:hover { background: var(--accent); color: #fff; }
+.badge-exit .badge-x { opacity: .6; font-size: 11px; }
+.badge-exit:hover .badge-x { opacity: 1; }
+
 .target { color: var(--accent); }
 
 /* ---------------- 二维码引导 ---------------- */
@@ -193,6 +210,28 @@ main {
 
 .connect-info { flex: 1; min-width: 0; }
 .lead { color: var(--ink-2); }
+
+/* 房间码 —— 首页二维码里带的也是它。扫码不方便时用户要照着屏幕念给对方，
+   所以字号放大、等宽、拉开字间距，让 h/j/2/5 这些容易听混的字符也看得清。 */
+.room-code-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 8px 10px;
+  background: var(--line-2);
+  border-radius: var(--radius-sm);
+}
+.room-code-label { flex: none; color: var(--ink-3); font-size: 13px; }
+.room-code {
+  flex: 1;
+  min-width: 0;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: .16em;
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
 
 .url-row {
   display: flex;
@@ -229,6 +268,10 @@ main {
   border: 1px solid #fde3c4;
 }
 .notice-ok { background: #f0fdf4; color: #15803d; border-color: #c8f0d4; }
+/* 中性提示：只陈述事实（二维码指向的地址能不能跨网络），
+   不用黄底警示的口吻 —— 那是给「真出问题了」准备的。 */
+.notice-quiet { background: var(--line-2); color: var(--ink-2); border-color: #e2e8f0; }
+.notice-quiet:empty { display: none; }
 
 /* ---------------- 设备卡片 ---------------- */
 
