@@ -446,13 +446,19 @@ async function main() {
   eq(buildSelfConfig({}).autoDiscover, true,
     '未配置：默认开启（旧行为不受影响）');
 
-  // off 只挡**公网 IPv4** 的自动分房；私网 /24 与 IPv6 /64 的分房逻辑不变。
+  // off 只挡**公网**地址的自动分房；私网 / ULA / 链路本地的分房逻辑不变。
   // 这一条很关键：Node 自建版跑在内网，服务端看到的是私网 IP，
   // 所以「局域网自动发现」在自建版上照常可用。
   eq(roomIdForIp('192.168.1.5', 'off'), 'lan:192.168.1',
-    'off 下私网 /24 仍分房（自建版局域网发现不受影响）');
-  eq(roomIdForIp('2408:8207:1234:5678:9abc::1', 'off'), 'v6:2408:8207:1234:5678',
-    'off 下 IPv6 仍按 /64 聚合');
+    'off 下私网 IPv4 仍按 /24 分房（自建版不受影响）');
+  eq(roomIdForIp('2408:8207:1234:5678:9abc::1', 'off'), null,
+    'off 下公网 IPv6（2000::/3）也不分房 —— 这个坑上线后才实测出来');
+  eq(roomIdForIp('2408:8207:1234:5678:9abc::1', 'ip'), 'v6:2408:8207:1234:5678',
+    'ip 模式下公网 IPv6 仍按 /64 聚合');
+  eq(roomIdForIp('fd00:1:2:3::9', 'off'), 'v6:fd00:1:2:3',
+    'off 下 ULA（fc00::/7）仍分房 —— 自建版内网 IPv6 靠它');
+  eq(roomIdForIp('fe80::1', 'off'), 'v6:fe80::1',
+    'off 下链路本地 IPv6（fe80::）仍分房');
 
   // 行为层：公网部署下两台设备应当**完全无法自动互见**。
   // 两台用**同一个出口 IP**（同一路由器 / 同一 CGNAT 出口）—— 这是最关键的一种，
@@ -488,6 +494,18 @@ async function main() {
   await send(ipDo, ia, { type: 'join-lan-room' });
   await send(ipDo, ib, { type: 'join-lan-room' });
   eq(ib.take().filter((m) => m.type === 'peers')[0].peers.length, 1, '对照组 ip 模式：同出口 IP 的 B 能看见 A');
+
+  // IPv6 走的是另一条分支，必须单独测 —— 上线后实测就栽在这里：
+  // `if (ip.includes(':')) return 'v6:'+...` 写在开关**之前**，
+  // 于是 IPv6 网络下 off 形同虚设，陌生人照样被分进同一间房。
+  // 用同一个 /64 前缀的两台设备模拟"运营商共享一个 /64"的情形。
+  const v6a = await connect(offEnv, offCtx, '2409:8a00:2612:2c90::1', 'Mozilla/5.0 (iPhone)');
+  const v6b = await connect(offEnv, offCtx, '2409:8a00:2612:2c90::2', 'Mozilla/5.0 (iPhone)');
+  selfOf(v6a); selfOf(v6b);
+  await send(offDo, v6a, { type: 'join-lan-room' });
+  await send(offDo, v6b, { type: 'join-lan-room' });
+  eq(v6b.take().filter((m) => m.type === 'peers').length, 0, 'off：公网 IPv6（同一个 /64）也收不到 peers');
+  eq(offDo._roomsIndex().size, 0, 'off：IPv6 也没有留下任何自动房间');
 
   /* ---------------------------- 汇总 ---------------------------- */
   console.log('\n' + '─'.repeat(56));

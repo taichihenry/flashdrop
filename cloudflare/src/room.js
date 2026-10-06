@@ -224,21 +224,33 @@ function acceptedReportedAddr(reported) {
 
 /**
  * 房间划分策略（保持与 Node 版一致，只多了 wanRoomMode 开关）：
- *   · 私网 IPv4 → 按 /24 聚合（同一个 Wi-Fi 下的设备自动成房）
- *   · IPv6     → 按 /64 聚合（一个家庭/公司通常共享同一个 /64）
- *   · 公网 IPv4 → 默认按整段 IP 成一房
+ *   · 私网 IPv4 / 私网 IPv6 → 按 /24、/64 聚合（同一个 Wi-Fi 下的设备自动成房）
+ *   · 公网 IPv4            → 默认整段成一房；wanRoomMode='off' 时**不分房**
+ *   · 公网 IPv6（2000::/3）→ 同上，wanRoomMode='off' 时**也不分房**
  *
- * ⚠ 公网 IPv4 分房有个真实风险，上线前必须知道：
- *   国内运营商（尤其中国移动 4G/5G）大量使用 CGNAT，成千上万个用户会共享
- *   同一个出口 IP。按 IP 分房意味着这些人会被放进同一间房、互相可见。
- *   所以留了 wanRoomMode = 'off' 的后路 —— 关掉自动发现，只保留配对码/房间码。
+ * ⚠ 公网分房有个真实风险，上线前必须知道：
+ *   国内运营商（尤其移动 4G/5G）大量使用 CGNAT，成千上万个用户会共享同一个出口
+ *   IPv4；IPv6 同理 —— 运营商常把一整段 /64 分给大量用户共享。
+ *   按地址分房意味着这些人会被放进同一间房、互相可见。
+ *   所以留了 wanRoomMode = 'off' 的后路 —— 关掉自动发现，只保留配对码 / 房间码。
+ *
+ * ⚠ 特别注意 IPv6 这条：它的判断**必须在开关之前就做**（否则 off 在 IPv6 网络下
+ *   形同虚设）。这个坑真的踩过：上线后用 IPv6 网络实测，join-lan-room 仍然
+ *   把人分进了 v6:xxxx 房间 —— 因为原实现里 `ip.includes(':')` 直接 return 了。
  *
  * @param {string} ip
  * @param {'ip'|'off'} wanRoomMode
  * @returns {string|null} null 表示不进任何自动房间
  */
 export function roomIdForIp(ip, wanRoomMode = 'ip') {
-  if (ip.includes(':')) return 'v6:' + ip.split(':').slice(0, 4).join(':');
+  if (ip.includes(':')) {
+    // 公网 IPv6（2000::/3，首个 hextet 以 2 或 3 开头）与公网 IPv4 同等对待：
+    // off 时不自动分房。私网 / ULA（fc00::/7）/ 链路本地（fe80::）仍按 /64 聚合 ——
+    // 局域网自建版正是靠这条才能"打开网页就互相看见"。
+    const isGlobalV6 = /^[23][0-9a-f]{3}:/i.test(ip);
+    if (isGlobalV6 && wanRoomMode === 'off') return null;
+    return 'v6:' + ip.split(':').slice(0, 4).join(':');
+  }
   if (isPrivateIpv4(ip)) return 'lan:' + ip.split('.').slice(0, 3).join('.');
   if (wanRoomMode === 'off') return null;
   return 'wan:' + ip;
