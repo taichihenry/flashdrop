@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "test": "node test/do-sim.js"
+    "test": "node test/do-sim.js",
+    "test:redirect": "node test/redirect.js"
   },
   "devDependencies": {
     "wrangler": "^4.147.0"

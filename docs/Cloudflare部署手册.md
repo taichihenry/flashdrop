@@ -307,10 +307,36 @@ routes = [
 繁体 zone 的建法和简体完全一样（§5.1 → §5.3），**但不用再去改 NS** ——
 CNNIC 那边一直就是 `odin` / `tricia`，所以 zone 通常建完直接就是 `active`。
 
-**归一逻辑不用你写**：`public/www-redirect.js` 里的白名单
-`FAMILY = ['6.xn--fiqs8s', '6.xn--fiqz9s']` 会把后面三种写法都送到 `6.中国`。
+**归一逻辑不用你写**：Worker 入口（`cloudflare/src/index.js` 的 `fetch()` 最前面）
+已经用 301 把 www / 繁体两种写法都收到 `6.中国`；前端 `public/www-redirect.js` 里还有
+一份等价的浏览器版（白名单 `FAMILY = ['6.xn--fiqs8s', '6.xn--fiqz9s']`），那是给**本地
+Node 版**用的 —— Node 版没有 Worker 这层，只能靠页面自己跳。
 这是必须的 —— 浏览器不认「简繁等效」和「www 等价」，四个域名是四个 origin，
 `localStorage` 各自独立，不归一就会出「在一个地址改的设备名，换个地址打开变默认名」。
+
+### 5.5 顺手打开 Always Use HTTPS（两个 zone 各点一次）
+
+手机浏览器在地址栏手输裸域名时会**自动补 `http://`**（桌面浏览器走 HTTPS-First 所以
+没这问题）。而 http 不是安全上下文 —— `crypto.subtle` 与 `RTCPeerConnection` 都被浏览器
+禁掉，P2P 直接退化成服务器中继，传文件慢一档。
+
+Worker 里已经有一层**代码级 301**（把 http 和域名写法一次性归一到
+`https://6.中国`），但静态资源是直落 Assets、不进 Worker 的，所以还建议在边缘再兜一层：
+
+**SSL/TLS → Edge Certificates → 向下滚 → Always Use HTTPS → 打开**
+
+`6.中国` 和 `6.中國` 两个 zone 各做一次。它零代码、不额外计费、在 Worker 之前执行，
+能把**所有路径**的 http 请求都跳到 https。
+
+> **为什么不能只靠 HSTS**：规范要求浏览器**忽略 http 响应里的 HSTS 头**，所以 HSTS
+> 只管「来过一次之后」。用户的第一次永远落在 http —— 只有服务端 301 能管第一次。
+
+验证（离线 + 真实浏览器两条）：
+
+```bash
+node cloudflare/test/redirect.js        # 22 项，含"本地 dev 不被误跳"的反例
+node test/www-redirect.js               # 默认打线上，含 http→https 与 isSecureContext 断言
+```
 
 ---
 

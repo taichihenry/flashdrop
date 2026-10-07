@@ -155,6 +155,43 @@ function withWww(base, hostname) {
     else no(`跳转后页面异常 readyState=${ready} FlashDrop=${hasApp}`);
 
     /* ------------------------------------------------------------------
+       [1.5] 真实浏览器里跑一遍 http → https
+             这就是用户报的原始场景：手机浏览器手输裸域名时默认补 `http://`
+             （桌面浏览器走 HTTPS-First，所以只有手机会中招）。
+             单纯靠 HSTS 救不了「第一次」—— 规范要求浏览器忽略 http 响应里的
+             HSTS，只有服务端 301 才能管第一次。所以这里必须用**显式的 http
+             URL** 才能复现，不能靠浏览器自动补全。
+             本地自建服务本身就是 http，不该有这一跳 → 本地跑时跳过。
+    ------------------------------------------------------------------ */
+    console.log('');
+    if (isLocal) {
+      skip++;
+      console.log('[1.5] ⏭  跳过 http → https（本地自建服务本来就是 http，不该跳）');
+    } else {
+      const httpUrl = 'http://' + apex.hostname + '/' + HASH;
+      console.log(`[1.5] 打开 ${httpUrl}`);
+      console.log(`      期望：自动落到 ${apex.origin}/ 且已是安全上下文`);
+
+      await b.cdp.send('Page.navigate', { url: httpUrl });
+
+      // 轮询等落定：IDN 域名首次要 DNS + TLS 握手，固定 sleep 会误判
+      await waitFor('http 被顶到 https', async () => {
+        try { return /^https:/.test(await b.cdp.eval('location.href')); }
+        catch { return false; }
+      }, 25000, 250).catch(() => {});
+
+      const gotHref = await b.cdp.eval('location.href').catch(() => '');
+      console.log('      实际：' + gotHref);
+
+      if (/^https:/.test(gotHref)) ok('http 被 301 到 https（不用用户手改地址）');
+      else no(`仍停在非 https：${gotHref}`);
+
+      const secureContext = await b.cdp.eval('window.isSecureContext').catch(() => false);
+      if (secureContext === true) ok('isSecureContext = true（crypto.subtle / WebRTC 可用）');
+      else no(`isSecureContext = ${secureContext}（P2P 会被浏览器禁掉）`);
+    }
+
+    /* ------------------------------------------------------------------
        [2] 直接开主域名 → 不能被误跳（否则就是死循环了）
     ------------------------------------------------------------------ */
     console.log('');

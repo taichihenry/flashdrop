@@ -445,9 +445,14 @@ node test/rename.js
 #    一台发给多台且 SHA-256 一致、中继背压真的生效
 node test/relay-multicast.js
 
-# ⑩ www 归一：`www.<域>` 打开后必须原地跳到主域名，且 hash 不能丢
-#    （两个域名是两个 origin，localStorage 隔离 —— 不归一的话
-#      「改的设备名 / 配对记忆」在两边各存一份，用户看到的就是"改名没生效"）
+# ⑩ 域名归一 + 强制 HTTPS：`www.<域>` / 繁体域 / 裸 http 打开后都要归一到
+#    `https://6.中国`，且 hash 不能丢。
+#    ① 域名归一：两个域名是两个 origin，localStorage 隔离 —— 不归一的话
+#      「改的设备名 / 配对记忆」在两边各存一份，用户看到的就是"改名没生效"；
+#    ② 协议归一：手机浏览器手输裸域名默认补 http://，而 http 不是安全上下文，
+#      crypto.subtle 与 RTCPeerConnection 都被禁掉，P2P 直接退化成中继（慢一档）。
+#      HSTS 管不了第一次（浏览器忽略 http 响应里的 HSTS），只有服务端 301 能管。
+#    浏览器全程跑一遍（含真实浏览器里的 http → https 与 isSecureContext 断言）
 node test/www-redirect.js
 node test/www-redirect.js http://6.xn--fiqs8s:8986   # 本地跑（自动用 host-resolver-rules 映射到本机）
 
@@ -503,7 +508,8 @@ BASE=http://127.0.0.1:18766 node test/copy.js
 Cloudflare 版的信令逻辑另有一套**完全离线**的测试（不需要云账号、不需要 wrangler）：
 
 ```bash
-cd cloudflare && npm test     # 83 项：分房 / 转发 / 配对 / 休眠重建 / 越权防护 / 人数上限 / 限流
+cd cloudflare && npm test             # 99 项：分房 / 转发 / 配对 / 休眠重建 / 越权防护 / 人数上限 / 限流
+cd cloudflare && npm run test:redirect # 22 项：http→https、www / 繁体归一、本地 dev 不被误跳
 ```
 
 ---
@@ -587,8 +593,9 @@ npx wrangler deploy       # 路线 B：本机部署
 完整步骤见 **`docs/Cloudflare部署手册.md`**（内含本机 `git push` 必须带的代理参数），
 上线前的风险清单见 **`docs/上线前检查报告.md`**。
 
-架构：静态资源由 Workers Assets 直接吐（不计费），只有 `/ws` 信令和
-`/turn-credentials` 两条路径进 Worker，分别交给 `SignalRoom` 和 `TurnBudget`
+架构：静态资源由 Workers Assets 直接吐（不计费）；进 Worker 的只有**首页**
+（`/` 与 `/index.html`，为了做协议 + 域名归一，见 §10.3）、`/ws` 信令、
+`/turn-credentials` 三条路径，后两条分别交给 `SignalRoom` 和 `TurnBudget`
 两个 Durable Object。前端代码与本地 Node 版**共用同一份**，不存在两套漂移。
 
 ### 10.1 成本：跑在免费额度里，以及代码里怎么守住它
@@ -704,3 +711,50 @@ node run.js
 ```
 
 </details>
+
+### 10.3 强制 HTTPS：为什么必须做，以及怎么兜两层
+
+**现象**：手机浏览器在地址栏手输 `6.中国`，会自动补成 `http://6.中国` ——
+每次都得手动把 `http` 改成 `https`。桌面浏览器不会有这问题，因为它默认走
+HTTPS-First。所以这个 bug 只在手机上能复现，很容易被当成"用户自己的问题"。
+
+**为什么不能忍**（不是洁癖，是功能真的废了一半）：
+
+| 能力 | 依赖 | 在 http 下 |
+|---|---|---|
+| P2P 端到端加密握手 | `crypto.subtle` | **不存在** → 加密协商直接失败 |
+| 点对点数据通道 | `RTCPeerConnection` | 被浏览器禁用 → 打洞无从谈起 |
+| 结果 | —— | 只能退化走 `/ws` 服务器中继，**慢一档**（传大文件尤其明显） |
+
+**为什么 HSTS 救不了**：规范要求浏览器**忽略 http 响应里的 HSTS 头**（Cloudflare
+即使在 http 响应里带上它也没用）。HSTS 只管"来过一次之后"，而用户的**第一次**
+永远落在 http —— 那正是每次都要手改地址的根因。**只有服务端 301 能管第一次。**
+
+所以这里做了**两层**，互为保险：
+
+**第 1 层（代码，随版本走）**：`cloudflare/src/index.js` 的 `fetch()` 最前面，
+把「协议 + 域名写法」一次性收归到 `https://6.中国`，返回 **301**（不是 302 ——
+301 会被浏览器记住，下次连 http 都不试）。
+
+⚠️ 必须同时在 `wrangler.toml` 里写 `run_worker_first = ["/", "/index.html"]`。
+Assets 的默认策略是**静态资源优先**：`/` 能命中 `index.html` 就直接由 Assets 吐，
+**Worker 一行都不执行**，归一逻辑等于摆设。加上之后 `app.js` 等仍然直连 Assets
+不进 Worker，计费代价极小（每次首页访问多 1 次请求）。
+
+⚠️ 判别"这个请求是不是真的过了边缘"**不能用 `cf-connecting-ip`** ——
+`wrangler dev` 会把它设成 `127.0.0.1`，照它判断会让**本地开发被全线 301 走**。
+也不能用 hostname / `Host`：`wrangler dev` 会把请求伪装成生产域名、端口都抹掉。
+可用的是 `cf-ray` / `cf-visitor` / `x-forwarded-proto`（本地全为 null，多列几个是留冗余）。
+
+**第 2 层（控制台，边缘动作，可选但推荐）**：每个 zone 打开
+**SSL/TLS → Edge Certificates → Always Use HTTPS**。它在 Worker 之前执行、
+零代码、不额外计费，而且**连静态资源的 http 请求也一并兜住** —— 这是第 1 层
+覆盖不到的一小块（`run_worker_first` 只放行了首页，`http://…/app.js` 这类
+冷门直连仍会直落 Assets，实践中无害：页面既然已经被跳到 https，子资源自然也是 https）。
+
+两个 zone（`6.中国`、`6.中國`）各点一次即可。做完用手机无痕模式输一次裸域名验证，
+还是 http 的话是浏览器缓存了旧的 301，清一次站点数据再看。
+
+验证脚本：`node cloudflare/test/redirect.js`（离线，22 项，含"本地 dev 不被误跳"
+的反例）与 `node test/www-redirect.js`（真实浏览器，含 http → https 与
+`isSecureContext` 断言）。

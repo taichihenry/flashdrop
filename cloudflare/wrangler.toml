@@ -41,6 +41,17 @@ binding = "ASSETS"
 # 不做 SPA fallback：找不到就是 404，避免把 /ws 之类的路径错误地回成 index.html
 not_found_handling = "none"
 
+# ⚠ 首页必须让 Worker 先处理，否则「协议 + 域名归一」是摆设。
+#
+# Assets 的默认策略是「静态资源优先」：请求路径若能命中一个静态文件，就直接由
+# Assets 返回，**Worker 一行都不执行**（这正是上面说的省计费设计）。
+# 于是 "/" 命中 index.html → 归一逻辑被跳过；而 /ws、/api/info 没有对应文件，
+# 所以它们能正常走到 Worker —— 这个差异就是排查时的突破口。
+#
+# 这里只放行首页两个路径，app.js / app.css / vendor 等仍然直连 Assets 不进
+# Worker，所以代价极小（每次首页访问多计一次请求，免费额度是 10 万/天）。
+run_worker_first = ["/", "/index.html"]
+
 # ---------------------------- Durable Objects ----------------------------
 
 [[durable_objects.bindings]]
